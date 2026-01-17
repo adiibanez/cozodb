@@ -23,3 +23,4 @@ Cargo.lock
 crates.hrl
 priv/crates
 /doc
+benchmark/cozodb_benchmark/benchmark_reports/*
