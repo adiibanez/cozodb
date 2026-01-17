@@ -38,11 +38,15 @@ docs:
 
 .PHONY: eunit
 eunit:
-	@$(REBAR3) eunit
+	@$(REBAR3) as test eunit
 
 .PHONY: ct
 ct:
-	@COZODB_TMP_DIR=$(COZODB_TMP_DIR) $(REBAR3) ct
+	@COZODB_TMP_DIR=$(COZODB_TMP_DIR) ERL_FLAGS="+SDio 128" $(REBAR3) as test ct
+
+.PHONY: benchmark
+benchmark:
+	@COZODB_TMP_DIR=$(COZODB_TMP_DIR) ERL_FLAGS="+SDio 128" $(REBAR3) as test ct --suite=cozodb_benchmark_SUITE
 
 .PHONY: xref
 xref:
@@ -55,7 +59,7 @@ cover:
 
 .PHONY: proper
 proper:
-	@$(REBAR3) proper
+	@$(REBAR3) as test proper
 
 
 .PHONY: dyalizer
