@@ -12,11 +12,19 @@ crate-type = ["cdylib"]
 
 [dependencies]
 rustler = {version = "0.36.2", features = ["nif_version_2_17"]}
-cozo = {git = "https://github.com/aramallo/cozo.git", tag = "v0.7.9-leapsight" }
+# Using local path temporarily to test new memory stats functionality
+cozo = {git = "https://github.com/aramallo/cozo.git", tag = "v0.8.0-leapsight" }
 uuid = "1.3.3"
 threadpool = "1.8.1"
 once_cell = "1.21.3"
 num_cpus = "1.17.0"
+
+# Memory allocator - jemalloc (optional, controlled by feature flag)
+# Only compile on non-MSVC platforms when jemalloc feature is enabled
+[target.'cfg(not(target_env = "msvc"))'.dependencies]
+tikv-jemallocator = { version = "0.6", features = ["stats", "profiling"], optional = true }
+tikv-jemalloc-ctl = { version = "0.6", features = ["stats", "profiling"], optional = true }
+tikv-jemalloc-sys = { version = "0.6", features = ["stats", "profiling"], optional = true }
 
 # ==============================================================================
 # Pin the following to match cozo's working version
@@ -35,9 +43,14 @@ crossbeam = "0.8.4"
 default = [
     "cozo/storage-sqlite",
     "cozo/storage-rocksdb",
-    "cozo/graph-algo"
+    "cozo/graph-algo",
+    "jemalloc"  # Re-enabled for memory profiling
 ]
 
+# Use jemalloc as the global allocator (better for high concurrency, but more memory retention)
+# Disable with: --no-default-features --features "cozo/storage-sqlite,cozo/storage-rocksdb,cozo/graph-algo"
+jemalloc = ["tikv-jemallocator", "tikv-jemalloc-ctl", "tikv-jemalloc-sys"]
+
 [target.'cfg(target_os = "linux")'.dependencies]
-cozo = {git = "https://github.com/aramallo/cozo.git", tag = "v0.7.9-leapsight", features = ["io-uring"]}
+cozo = { git = "https://github.com/aramallo/cozo.git", tag = "v0.8.0-leapsight", features = ["io-uring"] }
 

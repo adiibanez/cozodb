@@ -367,6 +367,12 @@ For more details, see the <a href="https://docs.cozodb.org/en/latest/vector.html
 %% API: Maintenance
 -export([compact/1]).
 
+%% API: Debug/Profiling
+-export([memory_stats/0]).
+-export([flush_memtables/1]).
+-export([rocksdb_memory_stats/1]).
+-export([dump_heap_profile/1]).
+
 -on_load(init/0).
 
 
@@ -1033,6 +1039,86 @@ compact(Dbhandle) ->
     end.
 
 %% =============================================================================
+%% API: Debug/Profiling
+%% =============================================================================
+
+-doc """
+Returns memory statistics from the jemalloc allocator used by the NIF.
+
+This function is useful for debugging memory usage issues in the Rust NIF layer.
+The returned map contains:
+- `allocated`: Total bytes allocated by the application
+- `resident`: Total bytes in physically resident data pages
+- `mapped`: Total bytes in active memory mappings
+- `retained`: Total bytes retained (not returned to OS)
+- `db_handles`: Number of open database handles
+- `callback_registrations`: Number of active callback registrations
+
+Note: This only shows memory used by the Rust NIF, not the Erlang VM.
+Use `erlang:memory/0` to see Erlang VM memory usage.
+""".
+-spec memory_stats() -> {ok, map()} | {error, term()}.
+
+memory_stats() ->
+    memory_stats_nif().
+
+-doc """
+Flush all RocksDB memtables to disk.
+This forces a memtable flush which can help release memory held by memtables.
+Only works for RocksDB storage backend.
+""".
+-spec flush_memtables(DbHandle :: db_handle()) -> ok | {error, term()}.
+
+flush_memtables(DbHandle) when ?IS_DB_HANDLE(DbHandle) ->
+    flush_memtables_nif(DbHandle).
+
+-doc """
+Get RocksDB memory statistics.
+
+Returns a map containing:
+- `memtable_size`: Current size of all memtables (bytes)
+- `block_cache_usage`: Block cache usage (bytes)
+- `block_cache_pinned`: Pinned entries in block cache (bytes)
+- `table_readers_mem`: Estimated memory used by table readers (bytes)
+- `total`: Sum of the above (bytes)
+
+Returns `{error, not_rocksdb}` for non-RocksDB storage backends.
+""".
+-spec rocksdb_memory_stats(DbHandle :: db_handle()) -> {ok, map()} | {error, term()}.
+
+rocksdb_memory_stats(DbHandle) when ?IS_DB_HANDLE(DbHandle) ->
+    rocksdb_memory_stats_nif(DbHandle).
+
+
+-doc """
+Dump a jemalloc heap profile to the specified file path.
+
+IMPORTANT: For this to work, the application MUST be started with:
+```
+MALLOC_CONF="prof:true,prof_prefix:jeprof.out" erl ...
+```
+
+The profile can then be analyzed with:
+```
+jeprof --svg /path/to/beam.smp /path/to/profile.heap > heap.svg
+```
+
+Returns:
+- `{ok, Path}` - Profile dumped successfully to the given path
+- `{error, profiling_not_enabled}` - jemalloc profiling not enabled (need MALLOC_CONF=prof:true)
+- `{error, not_jemalloc}` - Not using jemalloc allocator
+- `{error, Reason}` - Other error
+""".
+-spec dump_heap_profile(Path :: string() | binary()) -> {ok, string()} | {error, term()}.
+
+dump_heap_profile(Path) when is_list(Path) ->
+    dump_heap_profile(list_to_binary(Path));
+
+dump_heap_profile(Path) when is_binary(Path) ->
+    dump_heap_profile_nif(Path).
+
+
+%% =============================================================================
 %% API: Utils
 %% =============================================================================
 
@@ -1225,6 +1311,34 @@ register_callback_nif(_DbHandle, _RelName) ->
     ok.
 
 unregister_callback_nif(_DbHandle, _Id) ->
+    ?NIF_NOT_LOADED.
+
+%% @private
+-spec memory_stats_nif() ->
+    {ok, map()} | {error, term()}.
+
+memory_stats_nif() ->
+    ?NIF_NOT_LOADED.
+
+%% @private
+-spec flush_memtables_nif(DbHandle :: db_handle()) ->
+    ok | {error, term()}.
+
+flush_memtables_nif(_DbHandle) ->
+    ?NIF_NOT_LOADED.
+
+%% @private
+-spec rocksdb_memory_stats_nif(DbHandle :: db_handle()) ->
+    {ok, map()} | {error, term()}.
+
+rocksdb_memory_stats_nif(_DbHandle) ->
+    ?NIF_NOT_LOADED.
+
+%% @private
+-spec dump_heap_profile_nif(Path :: binary()) ->
+    {ok, binary()} | {error, term()}.
+
+dump_heap_profile_nif(_Path) ->
     ?NIF_NOT_LOADED.
 
 %% =============================================================================

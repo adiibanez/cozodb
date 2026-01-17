@@ -16,6 +16,16 @@
 // limitations under the License.
 // =============================================================================
 
+// Use jemalloc as the global allocator when the feature is enabled
+// This provides better memory management under high concurrency but may retain more memory
+// Disable with: cargo build --no-default-features --features "..."
+#[cfg(all(feature = "jemalloc", not(target_env = "msvc")))]
+use tikv_jemallocator::Jemalloc;
+
+#[cfg(all(feature = "jemalloc", not(target_env = "msvc")))]
+#[global_allocator]
+static GLOBAL: Jemalloc = Jemalloc;
+
 // Rust std libs
 
 use core::hash::Hash;
@@ -109,7 +119,11 @@ rustler::init!(
         backup,
         restore,
         register_callback,
-        unregister_callback
+        unregister_callback,
+        memory_stats,
+        flush_memtables,
+        rocksdb_memory_stats,
+        dump_heap_profile
     ],
     load = on_load
 );
@@ -236,12 +250,18 @@ struct NamedRowsWrapper<'a>(&'a NamedRows);
 impl<'a> Encoder for NamedRowsWrapper<'_> {
     fn encode<'b>(&self, env: Env<'b>) -> Term<'b> {
         let headers = self.0.headers.encode(env);
-        let rows: Vec<Vec<DataValueWrapper>> = self
+        // FIXED: Use iter() instead of clone().into_iter() to avoid copying all row data
+        let rows: Vec<Term<'b>> = self
             .0
             .rows
-            .clone()
-            .into_iter()
-            .map(|inner_vec| inner_vec.into_iter().map(DataValueWrapper).collect())
+            .iter()
+            .map(|inner_vec| {
+                inner_vec
+                    .iter()
+                    .map(|val| encode_data_value_ref(env, val))
+                    .collect::<Vec<Term<'b>>>()
+                    .encode(env)
+            })
             .collect();
         let count = rows.len();
         let next = match &self.0.next {
@@ -285,41 +305,57 @@ struct DataValueWrapper(DataValue);
 
 impl<'a> Encoder for DataValueWrapper {
     fn encode<'b>(&self, env: Env<'b>) -> Term<'b> {
-        match &self.0 {
-            DataValue::Null => atoms::null().encode(env),
-            DataValue::Bool(i) => i.encode(env),
-            DataValue::Num(i) => NumWrapper(i.clone()).encode(env),
-            DataValue::Str(i) => i.encode(env),
-            DataValue::Bytes(i) => i.encode(env),
-            DataValue::Uuid(w) => w.0.hyphenated().to_string().encode(env),
-            DataValue::List(i) => {
-                let encoded_values: Vec<Term<'b>> = i
-                    .iter()
-                    .map(|val| DataValueWrapper(val.clone()).encode(env))
-                    .collect();
+        encode_data_value_ref(env, &self.0)
+    }
+}
 
-                encoded_values.encode(env)
-            }
-            DataValue::Json(i) => match serde_json::to_string(&i) {
-                Ok(json_str) => (atoms::json(), json_str).encode(env),
-                Err(_) => "Failed to serialize JsonValue".encode(env),
-            },
-            DataValue::Vec(i) => VectorWrapper(i.clone()).encode(env),
-            DataValue::Validity(i) => {
-                let ts = i.timestamp.0 .0.encode(env);
-                let assert = i.is_assert.0.encode(env);
-                // (float, bool)
-                (ts, assert).encode(env)
-            }
-            DataValue::Regex(_) | DataValue::Set(_) | DataValue::Bot =>
-            // This types are only used internally so we shoul never receive
-            // one of this as a result of running a script, but we match
-            // them to avoid a compiler error.
-            // Just in case we do get them, we return the atom 'null'
-            {
-                atoms::null().encode(env)
-            }
+/// Encode a DataValue by reference without cloning the value itself.
+/// This is more memory efficient than wrapping in DataValueWrapper which
+/// requires ownership or cloning.
+fn encode_data_value_ref<'b>(env: Env<'b>, value: &DataValue) -> Term<'b> {
+    match value {
+        DataValue::Null => atoms::null().encode(env),
+        DataValue::Bool(i) => i.encode(env),
+        DataValue::Num(i) => encode_num_ref(env, i),
+        DataValue::Str(i) => i.as_str().encode(env),
+        DataValue::Bytes(i) => i.as_slice().encode(env),
+        DataValue::Uuid(w) => w.0.hyphenated().to_string().encode(env),
+        DataValue::List(i) => {
+            let encoded_values: Vec<Term<'b>> = i
+                .iter()
+                .map(|val| encode_data_value_ref(env, val))
+                .collect();
+            encoded_values.encode(env)
         }
+        DataValue::Json(i) => match serde_json::to_string(&i) {
+            Ok(json_str) => (atoms::json(), json_str).encode(env),
+            Err(_) => "Failed to serialize JsonValue".encode(env),
+        },
+        DataValue::Vec(i) => encode_vector_ref(env, i),
+        DataValue::Validity(i) => {
+            let ts = i.timestamp.0 .0.encode(env);
+            let assert = i.is_assert.0.encode(env);
+            (ts, assert).encode(env)
+        }
+        DataValue::Regex(_) | DataValue::Set(_) | DataValue::Bot => {
+            atoms::null().encode(env)
+        }
+    }
+}
+
+/// Encode Num by reference
+fn encode_num_ref<'b>(env: Env<'b>, num: &Num) -> Term<'b> {
+    match num {
+        Num::Int(i) => i.encode(env),
+        Num::Float(f) => f.encode(env),
+    }
+}
+
+/// Encode Vector by reference
+fn encode_vector_ref<'b>(env: Env<'b>, vec: &Vector) -> Term<'b> {
+    match vec {
+        Vector::F32(arr) => arr.to_vec().encode(env),
+        Vector::F64(arr) => arr.to_vec().encode(env),
     }
 }
 
@@ -920,6 +956,198 @@ fn unregister_callback<'a>(env: Env<'a>, db_handle: Term<'a>, reg_id: u32) -> Ni
     }
 
     Ok(result.encode(env))
+}
+
+/// Returns memory statistics.
+/// When jemalloc is enabled, returns detailed allocator stats.
+/// Otherwise, returns basic handle counts.
+#[rustler::nif(name = "memory_stats_nif")]
+fn memory_stats<'a>(env: Env<'a>) -> NifResult<Term<'a>> {
+    // Count open database handles
+    let db_count = {
+        let dbs = HANDLES.dbs.lock().unwrap();
+        dbs.len()
+    };
+
+    let registrations_count = {
+        let regs = REGISTRATIONS.lock().unwrap();
+        regs.len()
+    };
+
+    let mut map = rustler::types::map::map_new(env);
+    map = map.map_put("db_handles".encode(env), db_count.encode(env)).unwrap();
+    map = map.map_put("callback_registrations".encode(env), registrations_count.encode(env)).unwrap();
+
+    // Add jemalloc stats when the feature is enabled
+    #[cfg(all(feature = "jemalloc", not(target_env = "msvc")))]
+    {
+        use tikv_jemalloc_ctl::{epoch, stats};
+
+        // Advance the epoch to get fresh stats
+        if let Ok(e) = epoch::mib() {
+            let _ = e.advance();
+        }
+
+        map = map.map_put("allocator".encode(env), "jemalloc".encode(env)).unwrap();
+
+        // allocated: Total number of bytes allocated by the application
+        if let Ok(allocated) = stats::allocated::read() {
+            map = map.map_put("allocated".encode(env), allocated.encode(env)).unwrap();
+        }
+
+        // active: Total number of bytes in active pages allocated by the application
+        if let Ok(active) = stats::active::read() {
+            map = map.map_put("active".encode(env), active.encode(env)).unwrap();
+        }
+
+        // resident: Total number of bytes in physically resident data pages mapped
+        if let Ok(resident) = stats::resident::read() {
+            map = map.map_put("resident".encode(env), resident.encode(env)).unwrap();
+        }
+
+        // mapped: Total number of bytes in active extents mapped by the allocator
+        if let Ok(mapped) = stats::mapped::read() {
+            map = map.map_put("mapped".encode(env), mapped.encode(env)).unwrap();
+        }
+
+        // retained: Total number of bytes in virtual memory mappings that were
+        // retained rather than returned to the OS
+        if let Ok(retained) = stats::retained::read() {
+            map = map.map_put("retained".encode(env), retained.encode(env)).unwrap();
+        }
+    }
+
+    #[cfg(not(all(feature = "jemalloc", not(target_env = "msvc"))))]
+    {
+        map = map.map_put("allocator".encode(env), "system".encode(env)).unwrap();
+    }
+
+    Ok((atoms::ok(), map).encode(env))
+}
+
+/// Flush all RocksDB memtables to disk.
+/// This forces a memtable flush which can help release memory.
+#[rustler::nif(schedule = "DirtyIo", name = "flush_memtables_nif")]
+fn flush_memtables<'a>(env: Env<'a>, db_handle: Term<'a>) -> NifResult<Term<'a>> {
+    let db_handle: DbHandle = db_handle.decode()?;
+
+    let db = match get_db(db_handle.db_id) {
+        Some(db) => db,
+        None => {
+            return Err(rustler::Error::Term(Box::new(
+                "invalid reference".to_string(),
+            )))
+        }
+    };
+
+    match db.flush() {
+        Ok(()) => Ok(atoms::ok().encode(env)),
+        Err(err) => Err(rustler::Error::Term(Box::new(format!("{:#?}", err)))),
+    }
+}
+
+/// Get RocksDB memory statistics.
+/// Returns a map with memtable_size, block_cache_usage, block_cache_pinned, and table_readers_mem.
+/// Returns {:error, :not_rocksdb} for non-RocksDB storage backends.
+#[rustler::nif(name = "rocksdb_memory_stats_nif")]
+fn rocksdb_memory_stats<'a>(env: Env<'a>, db_handle: Term<'a>) -> NifResult<Term<'a>> {
+    let db_handle: DbHandle = db_handle.decode()?;
+
+    let db = match get_db(db_handle.db_id) {
+        Some(db) => db,
+        None => {
+            return Err(rustler::Error::Term(Box::new(
+                "invalid reference".to_string(),
+            )))
+        }
+    };
+
+    match db.get_rocksdb_memory_stats() {
+        Some(stats) => {
+            let mut map = rustler::types::map::map_new(env);
+            map = map.map_put("memtable_size".encode(env), stats.memtable_size.encode(env)).unwrap();
+            map = map.map_put("block_cache_usage".encode(env), stats.block_cache_usage.encode(env)).unwrap();
+            map = map.map_put("block_cache_pinned".encode(env), stats.block_cache_pinned.encode(env)).unwrap();
+            map = map.map_put("table_readers_mem".encode(env), stats.table_readers_mem.encode(env)).unwrap();
+            // Calculate total
+            let total = stats.memtable_size + stats.block_cache_usage + stats.table_readers_mem;
+            map = map.map_put("total".encode(env), total.encode(env)).unwrap();
+            Ok((atoms::ok(), map).encode(env))
+        }
+        None => {
+            // Not a RocksDB backend
+            Ok((atoms::error(), "not_rocksdb".encode(env)).encode(env))
+        }
+    }
+}
+
+/// Dump a jemalloc heap profile to the specified file path.
+///
+/// IMPORTANT: For this to work, the application MUST be started with:
+///   MALLOC_CONF="prof:true,prof_prefix:jeprof.out"
+///
+/// The profile can then be analyzed with:
+///   jeprof --svg /path/to/beam.smp /path/to/profile.heap > heap.svg
+///
+/// Returns:
+///   {:ok, path} - Profile dumped successfully to the given path
+///   {:error, :profiling_not_enabled} - jemalloc profiling not enabled (need MALLOC_CONF=prof:true)
+///   {:error, :not_jemalloc} - Not using jemalloc allocator
+///   {:error, reason} - Other error
+#[rustler::nif(name = "dump_heap_profile_nif")]
+fn dump_heap_profile<'a>(env: Env<'a>, path: String) -> NifResult<Term<'a>> {
+    #[cfg(all(feature = "jemalloc", not(target_env = "msvc")))]
+    {
+        use std::ffi::CString;
+
+        // Check if profiling is enabled
+        let prof_active: bool = match tikv_jemalloc_ctl::profiling::prof::read() {
+            Ok(active) => active,
+            Err(_) => {
+                return Ok((atoms::error(), "profiling_not_available".encode(env)).encode(env));
+            }
+        };
+
+        if !prof_active {
+            return Ok((atoms::error(), "profiling_not_enabled".encode(env)).encode(env));
+        }
+
+        // Dump the profile to the specified path
+        // We need to use the raw mallctl interface for prof.dump
+        let path_cstr = match CString::new(path.clone()) {
+            Ok(s) => s,
+            Err(_) => {
+                return Ok((atoms::error(), "invalid_path".encode(env)).encode(env));
+            }
+        };
+
+        // Use the prof.dump mallctl to dump to a specific file
+        let name = CString::new("prof.dump").unwrap();
+        let path_ptr = path_cstr.as_ptr();
+
+        let result = unsafe {
+            tikv_jemalloc_sys::mallctl(
+                name.as_ptr(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &path_ptr as *const _ as *mut std::ffi::c_void,
+                std::mem::size_of::<*const i8>(),
+            )
+        };
+
+        if result == 0 {
+            Ok((atoms::ok(), path.encode(env)).encode(env))
+        } else {
+            let error_msg = format!("mallctl failed with code {}", result);
+            Ok((atoms::error(), error_msg.encode(env)).encode(env))
+        }
+    }
+
+    #[cfg(not(all(feature = "jemalloc", not(target_env = "msvc"))))]
+    {
+        let _ = path; // suppress unused warning
+        Ok((atoms::error(), "not_jemalloc".encode(env)).encode(env))
+    }
 }
 
 // =============================================================================
