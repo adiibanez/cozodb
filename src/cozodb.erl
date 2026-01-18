@@ -144,6 +144,88 @@ following script is equivalent to the previous example.
 ```
 For more details, see the <a href="https://docs.cozodb.org/en/latest/vector.html#full-text-search-fts" target="_">FTS documentation</a>.
 
+## Memory Management
+
+This NIF uses [jemalloc](https://jemalloc.net/) as the global allocator for both Rust
+and RocksDB (C++) allocations. This provides unified memory management and statistics
+across the entire NIF.
+
+### Memory Functions
+
+- `memory_stats/0` - Get jemalloc memory statistics (allocated, resident, mapped, retained)
+- `rocksdb_memory_stats/1` - Get RocksDB-specific memory usage (memtables, block cache)
+- `purge_jemalloc/0` - Force immediate return of unused memory to the OS
+- `set_jemalloc_decay/2` - Configure how aggressively memory is returned to the OS
+- `get_jemalloc_decay/0` - Query current decay settings
+
+### Understanding jemalloc Memory Retention
+
+jemalloc retains freed memory in "dirty pages" and "muzzy pages" for potential reuse,
+which improves performance but can make memory appear "leaked" when it's actually
+just cached. The decay times control how long this memory is held:
+
+- **Dirty pages**: Recently freed memory that still contains data
+- **Muzzy pages**: Dirty pages that have been purged but VM mapping is retained
+
+By default, jemalloc holds memory for 10 seconds before returning it to the OS.
+This NIF configures the most aggressive setting: **0ms (immediate return)**.
+
+This ensures memory is returned to the OS as soon as it's freed, which is important
+for long-running Erlang applications where memory visibility and predictable resource
+usage are critical.
+
+### Tuning Memory Return
+
+You can control memory return behavior at runtime:
+
+```erlang
+%% Check current decay settings
+{ok, Settings} = cozodb:get_jemalloc_decay().
+%% #{<<"dirty_decay_ms">> => 0, <<"muzzy_decay_ms">> => 0}
+
+%% Most aggressive - immediate return to OS (our default)
+%% Lowest memory usage, optimal for most Erlang applications
+ok = cozodb:set_jemalloc_decay(0, 0).
+
+%% Balanced - 1 second decay
+%% Slight performance improvement under very high allocation rates
+ok = cozodb:set_jemalloc_decay(1000, 1000).
+
+%% Less aggressive - original jemalloc default (10 seconds)
+%% Best performance but significantly higher memory retention
+ok = cozodb:set_jemalloc_decay(10000, 10000).
+
+%% Disable decay entirely - maximum memory retention
+ok = cozodb:set_jemalloc_decay(-1, -1).
+```
+
+### Environment Variables
+
+jemalloc behavior can be tuned at startup via environment variables:
+
+- `COZODB_JEMALLOC_BACKGROUND_THREAD` - Enable async purging (default: true)
+- `COZODB_JEMALLOC_NARENAS` - Limit arena count (optional, e.g., 4 or 8 for many threads)
+- `COZODB_JEMALLOC_DIRTY_DECAY_MS` - Dirty page decay time (default: 1000ms)
+- `COZODB_JEMALLOC_MUZZY_DECAY_MS` - Muzzy page decay time (default: 1000ms)
+
+Example for aggressive memory return:
+```
+COZODB_JEMALLOC_DIRTY_DECAY_MS=0 COZODB_JEMALLOC_MUZZY_DECAY_MS=0 rebar3 shell
+```
+
+Example with limited arenas (useful with many dirty schedulers):
+```
+COZODB_JEMALLOC_NARENAS=8 rebar3 shell
+```
+
+### Recommended Tuning Strategy
+
+1. **Most applications**: Use the default (1000ms with background_thread) - balanced RSS and latency
+2. **Lowest RSS**: Set decay to 0ms - aggressive memory return, may impact latency under load
+3. **Many threads/schedulers**: Set `COZODB_JEMALLOC_NARENAS=8` to reduce per-arena overhead
+4. **Memory debugging**: Set decay to 0ms; call `purge_jemalloc/0` to force immediate cleanup
+5. **Benchmarking**: Compare 0ms vs 1000ms vs 5000ms to find optimal setting for your workload
+
 ## System Operations
 * Query Management: Monitor running queries with running/1 and terminate problematic queries using kill/2.
 """.
@@ -156,9 +238,10 @@ For more details, see the <a href="https://docs.cozodb.org/en/latest/vector.html
 -define(NIF_NOT_LOADED,
     erlang:nif_error({not_loaded, [{module, ?MODULE}, {line, ?LINE}]})
 ).
--define(IS_DB_HANDLE(X), (is_map(X) orelse is_reference(X))).
+-define(IS_DB_HANDLE(X), (is_map(X) andalso is_map_key(resource, X))).
+-define(GET_RESOURCE(X), maps:get(resource, X)).
 
--opaque db_handle() :: map() | reference().
+-opaque db_handle() :: #{resource := reference(), engine := binary(), path := binary()}.
 -type relations() :: #{
     relation_name() => #{
         headers => [binary()],
@@ -346,7 +429,6 @@ For more details, see the <a href="https://docs.cozodb.org/en/latest/vector.html
 -export([explain/2]).
 -export([info/1]).
 -export([rows_to_maps/1]).
--export([resource/1]).
 
 %% API: Operations
 -export([backup/2]).
@@ -366,6 +448,20 @@ For more details, see the <a href="https://docs.cozodb.org/en/latest/vector.html
 
 %% API: Maintenance
 -export([compact/1]).
+
+%% API: Debug/Profiling
+-export([memory_stats/0]).
+-export([flush_memtables/1]).
+-export([rocksdb_memory_stats/1]).
+-export([dump_heap_profile/1]).
+%% Block cache control (process-global)
+-export([clear_block_cache/0]).
+-export([set_block_cache_capacity/1]).
+-export([get_block_cache_stats/0]).
+%% jemalloc control
+-export([purge_jemalloc/0]).
+-export([set_jemalloc_decay/2]).
+-export([get_jemalloc_decay/0]).
 
 -on_load(init/0).
 
@@ -470,34 +566,27 @@ open(Engine, Path, Opts) when
 
 -doc """
 Closes the database.
-Notice that the call is asyncronous and the database might take a while to
-close and a subsequent invocation to {@link open/3} with the same `path`
-might fail.
+
+Note: With the ResourceArc-based implementation, this function is a no-op.
+The database is automatically closed when the handle is garbage collected.
+This function is kept for backwards compatibility.
 """.
--spec close(DbHandle :: db_handle()) -> ok | {error, Reason :: any()}.
+-spec close(DbHandle :: db_handle()) -> ok.
 
 close(DbHandle) when ?IS_DB_HANDLE(DbHandle) ->
-    close_nif(DbHandle).
+    %% No-op: ResourceArc is automatically cleaned up by Erlang GC
+    ok.
 
 -doc """
-Returns the CozoDB DBInstance as a NIF Resource.
-For testing and planned extensions, you SHALL NOT use this function.
-""".
--spec resource(DbHandle :: db_handle()) -> {ok, reference()} | {error, any()}.
-
-resource(DbHandle) when ?IS_DB_HANDLE(DbHandle) ->
-    resource_nif(DbHandle).
-
--doc """
-Closes the database.
-Notice that the call is asyncronous and the database might take a while to
-close and a subsequent invocation to {@link open/3} with the same `path`
-might fail.
+Returns metadata about the database handle.
 """.
 -spec info(DbHandle :: db_handle()) -> info().
 
 info(DbHandle) when ?IS_DB_HANDLE(DbHandle) ->
-    info_nif(DbHandle).
+    #{
+        engine => maps:get(engine, DbHandle),
+        path => maps:get(path, DbHandle)
+    }.
 
 -doc "".
 -spec run(DbHandle :: db_handle(), Script :: script()) ->
@@ -527,28 +616,19 @@ run(DbHandle, Script) when ?IS_DB_HANDLE(DbHandle) andalso is_binary(Script) ->
 run(DbHandle, Script, Opts) when is_list(Script) ->
     run(DbHandle, list_to_binary(Script), Opts);
 
-run(DbHandle, Query, #{sparql := true} = Opts) ->
-    case parse_sparql_nif(DbHandle, Query) of
-        {ok, Script} ->
-            run(DbHandle, Script, Opts);
-
-        {error, _} = Error ->
-            Error
-    end;
-
 run(DbHandle, Script, #{encoding := json} = Opts) when
     ?IS_DB_HANDLE(DbHandle) andalso is_binary(Script)
 ->
     Params = term_to_json_object(maps:get(parameters, Opts, #{})),
     ReadOnly = maps:get(read_only, Opts, false),
-    run_script_json_nif(DbHandle, Script, Params, ReadOnly);
+    run_script_json_res_nif(?GET_RESOURCE(DbHandle), Script, Params, ReadOnly);
 
 run(DbHandle, Script, #{encoding := map} = Opts) when
     ?IS_DB_HANDLE(DbHandle) andalso is_binary(Script)
 ->
     Params = term_to_json_object(maps:get(parameters, Opts, #{})),
     ReadOnly = maps:get(read_only, Opts, false),
-    run_script_str_nif(DbHandle, Script, Params, ReadOnly);
+    run_script_str_res_nif(?GET_RESOURCE(DbHandle), Script, Params, ReadOnly);
 
 run(DbHandle, Script, Opts) when
     ?IS_DB_HANDLE(DbHandle) andalso is_binary(Script) andalso is_map(Opts)
@@ -599,12 +679,12 @@ import(DbHandle, Relations) when
 import(DbHandle, Relations) when
     ?IS_DB_HANDLE(DbHandle) andalso is_binary(Relations)
 ->
-    import_relations_nif(DbHandle, Relations);
+    import_relations_res_nif(?GET_RESOURCE(DbHandle), Relations);
 
 import(DbHandle, Relations) when
     ?IS_DB_HANDLE(DbHandle) andalso is_list(Relations)
 ->
-    import_relations_nif(DbHandle, iolist_to_binary(Relations)).
+    import_relations_res_nif(?GET_RESOURCE(DbHandle), iolist_to_binary(Relations)).
 
 -doc """
 Export the specified relations in `Relations`.
@@ -638,17 +718,17 @@ containing the `headers` and `rows` of the relation.
 export(DbHandle, RelNames, #{encoding := json}) when
     ?IS_DB_HANDLE(DbHandle) andalso is_binary(RelNames)
 ->
-    export_relations_json_nif(DbHandle, RelNames);
+    export_relations_json_res_nif(?GET_RESOURCE(DbHandle), RelNames);
 
 export(DbHandle, RelNames, #{encoding := json}) when
     ?IS_DB_HANDLE(DbHandle) andalso is_list(RelNames)
 ->
-    export_relations_json_nif(DbHandle, RelNames);
+    export_relations_json_res_nif(?GET_RESOURCE(DbHandle), RelNames);
 
 export(DbHandle, RelNames, _) when
     ?IS_DB_HANDLE(DbHandle) andalso is_list(RelNames)
 ->
-    export_relations_nif(DbHandle, RelNames).
+    export_relations_res_nif(?GET_RESOURCE(DbHandle), RelNames).
 
 -doc """
 Exports the database to a SQLite file at `Path`.
@@ -660,8 +740,8 @@ To restore the database using this file see {@link restore/2}.
 backup(DbHandle, Path) when is_list(Path), Path =/= [] ->
     backup(DbHandle, list_to_binary(Path));
 
-backup(DbHandle, Path) when is_binary(Path) ->
-    backup_nif(DbHandle, Path).
+backup(DbHandle, Path) when ?IS_DB_HANDLE(DbHandle), is_binary(Path) ->
+    backup_res_nif(?GET_RESOURCE(DbHandle), Path).
 
 -doc """
 
@@ -672,8 +752,8 @@ backup(DbHandle, Path) when is_binary(Path) ->
 restore(DbHandle, Path) when is_list(Path), Path =/= [] ->
     restore(DbHandle, list_to_binary(Path));
 
-restore(DbHandle, Path) when is_binary(Path) ->
-    restore_nif(DbHandle, Path).
+restore(DbHandle, Path) when ?IS_DB_HANDLE(DbHandle), is_binary(Path) ->
+    restore_res_nif(?GET_RESOURCE(DbHandle), Path).
 
 -doc """
 
@@ -687,9 +767,9 @@ import_from_backup(DbHandle, Path, Relations) when is_list(Path), Path =/= [] ->
     import_from_backup(DbHandle, list_to_binary(Path), Relations);
 
 import_from_backup(DbHandle, Path, Relations) when
-    is_binary(Path), is_list(Relations)
+    ?IS_DB_HANDLE(DbHandle), is_binary(Path), is_list(Relations)
 ->
-    import_from_backup_nif(DbHandle, Path, Relations).
+    import_from_backup_res_nif(?GET_RESOURCE(DbHandle), Path, Relations).
 
 %% =============================================================================
 %% API: System Catalogue
@@ -978,7 +1058,7 @@ register_callback(DbHandle, RelName) when is_list(RelName) ->
 register_callback(DbHandle, RelName) when
     ?IS_DB_HANDLE(DbHandle) andalso is_binary(RelName)
 ->
-    register_callback_nif(DbHandle, RelName).
+    register_callback_res_nif(?GET_RESOURCE(DbHandle), RelName).
 
 -doc """
 
@@ -990,7 +1070,7 @@ register_callback(DbHandle, RelName) when
 unregister_callback(DbHandle, Id) when
     ?IS_DB_HANDLE(DbHandle) andalso is_integer(Id)
 ->
-    unregister_callback_nif(DbHandle, Id).
+    unregister_callback_res_nif(?GET_RESOURCE(DbHandle), Id).
 
 %% =============================================================================
 %% API: Monitor
@@ -1031,6 +1111,240 @@ compact(Dbhandle) ->
         {error, _} = Error ->
             Error
     end.
+
+%% =============================================================================
+%% API: Debug/Profiling
+%% =============================================================================
+
+-doc """
+Returns memory statistics from the jemalloc allocator used by the NIF.
+
+This function is useful for debugging memory usage issues in the Rust NIF layer.
+The returned map contains:
+- `allocated`: Total bytes allocated by the application
+- `resident`: Total bytes in physically resident data pages
+- `mapped`: Total bytes in active memory mappings
+- `retained`: Total bytes retained (not returned to OS)
+- `db_handles`: Number of open database handles
+- `callback_registrations`: Number of active callback registrations
+
+Note: This only shows memory used by the Rust NIF, not the Erlang VM.
+Use `erlang:memory/0` to see Erlang VM memory usage.
+""".
+-spec memory_stats() -> {ok, map()} | {error, term()}.
+
+memory_stats() ->
+    memory_stats_nif().
+
+-doc """
+Flush all RocksDB memtables to disk.
+This forces a memtable flush which can help release memory held by memtables.
+Only works for RocksDB storage backend.
+""".
+-spec flush_memtables(DbHandle :: db_handle()) -> ok | {error, term()}.
+
+flush_memtables(DbHandle) when ?IS_DB_HANDLE(DbHandle) ->
+    flush_memtables_res_nif(?GET_RESOURCE(DbHandle)).
+
+-doc """
+Get RocksDB memory statistics.
+
+Returns a map containing:
+- `memtable_size`: Current size of all memtables (bytes)
+- `block_cache_usage`: Block cache usage (bytes)
+- `block_cache_pinned`: Pinned entries in block cache (bytes)
+- `table_readers_mem`: Estimated memory used by table readers (bytes)
+- `total`: Sum of the above (bytes)
+
+Returns `{error, not_rocksdb}` for non-RocksDB storage backends.
+""".
+-spec rocksdb_memory_stats(DbHandle :: db_handle()) -> {ok, map()} | {error, term()}.
+
+rocksdb_memory_stats(DbHandle) when ?IS_DB_HANDLE(DbHandle) ->
+    rocksdb_memory_stats_res_nif(?GET_RESOURCE(DbHandle)).
+
+
+-doc """
+Dump a jemalloc heap profile to the specified file path.
+
+IMPORTANT: For this to work, the application MUST be started with:
+```
+MALLOC_CONF="prof:true,prof_prefix:jeprof.out" erl ...
+```
+
+The profile can then be analyzed with:
+```
+jeprof --svg /path/to/beam.smp /path/to/profile.heap > heap.svg
+```
+
+Returns:
+- `{ok, Path}` - Profile dumped successfully to the given path
+- `{error, profiling_not_enabled}` - jemalloc profiling not enabled (need MALLOC_CONF=prof:true)
+- `{error, not_jemalloc}` - Not using jemalloc allocator
+- `{error, Reason}` - Other error
+""".
+-spec dump_heap_profile(Path :: string() | binary()) -> {ok, string()} | {error, term()}.
+
+dump_heap_profile(Path) when is_list(Path) ->
+    dump_heap_profile(list_to_binary(Path));
+
+dump_heap_profile(Path) when is_binary(Path) ->
+    dump_heap_profile_nif(Path).
+
+
+%% -----------------------------------------------------------------------------
+%% @doc Clear all entries from the shared RocksDB block cache.
+%%
+%% This is a process-global operation that affects ALL RocksDB databases
+%% in this BEAM process. After clearing, reads will repopulate the cache
+%% as needed, so this provides temporary memory relief.
+%%
+%% Returns:
+%% - `ok` - Cache cleared successfully
+%% @end
+%% -----------------------------------------------------------------------------
+-doc """
+Clear all entries from the shared RocksDB block cache.
+
+This releases memory currently used by the block cache but keeps the cache
+structure intact. New reads will repopulate the cache as needed.
+
+**Note**: This is a process-global operation affecting ALL RocksDB databases.
+""".
+-spec clear_block_cache() -> ok.
+
+clear_block_cache() ->
+    clear_block_cache_nif().
+
+
+%% -----------------------------------------------------------------------------
+%% @doc Set the capacity of the shared RocksDB block cache in MB.
+%%
+%% This is a process-global operation that affects ALL RocksDB databases.
+%% Setting capacity to 0 effectively disables caching.
+%% Setting to a smaller value will trigger eviction of excess entries.
+%%
+%% Returns:
+%% - `ok` - Capacity set successfully
+%% @end
+%% -----------------------------------------------------------------------------
+-doc """
+Set the capacity of the shared RocksDB block cache in megabytes.
+
+Setting to 0 effectively disables caching. Setting to a smaller value than
+the current usage will trigger eviction of excess entries.
+
+**Note**: This is a process-global operation affecting ALL RocksDB databases.
+""".
+-spec set_block_cache_capacity(CapacityMB :: non_neg_integer()) -> ok.
+
+set_block_cache_capacity(CapacityMB) when is_integer(CapacityMB), CapacityMB >= 0 ->
+    set_block_cache_capacity_nif(CapacityMB).
+
+
+%% -----------------------------------------------------------------------------
+%% @doc Get statistics about the shared RocksDB block cache.
+%%
+%% Returns a map with:
+%% - `capacity` - Total capacity in bytes
+%% - `usage` - Current usage in bytes
+%% - `pinned_usage` - Pinned entries in bytes (cannot be evicted)
+%% @end
+%% -----------------------------------------------------------------------------
+-doc """
+Get statistics about the shared RocksDB block cache.
+
+Returns `{ok, Stats}` where Stats is a map containing:
+- `capacity` - Total capacity in bytes
+- `usage` - Current usage in bytes
+- `pinned_usage` - Pinned entries in bytes (cannot be evicted)
+
+**Note**: This is a process-global statistic covering ALL RocksDB databases.
+""".
+-spec get_block_cache_stats() -> {ok, map()}.
+
+get_block_cache_stats() ->
+    get_block_cache_stats_nif().
+
+
+%% -----------------------------------------------------------------------------
+%% @doc Force jemalloc to return unused memory to the operating system.
+%%
+%% This purges dirty pages from all jemalloc arenas, making them available
+%% to the OS. This can help reduce RSS when memory is no longer needed.
+%%
+%% Returns:
+%% - `{ok, PurgedBytes}` - Number of bytes returned to OS (approximate)
+%% - `{error, not_jemalloc}` - Not using jemalloc allocator
+%% - `{error, Reason}` - Other error
+%% @end
+%% -----------------------------------------------------------------------------
+-doc """
+Force jemalloc to return unused memory to the operating system.
+
+This purges dirty pages from all jemalloc arenas, making them available
+to the OS. Useful after large operations to reduce RSS.
+
+Returns:
+- `{ok, PurgedBytes}` - Approximate bytes returned to OS
+- `{error, not_jemalloc}` - Not using jemalloc allocator
+- `{error, Reason}` - Other error
+""".
+-spec purge_jemalloc() -> {ok, non_neg_integer()} | {error, term()}.
+
+purge_jemalloc() ->
+    purge_jemalloc_nif().
+
+-doc """
+Configure jemalloc decay times to control how aggressively memory is returned to the OS.
+
+Arguments:
+- `DirtyDecayMs` - Time in milliseconds before dirty pages are purged
+  - 0 = immediate return (most aggressive, may impact performance)
+  - -1 = disable decay (jemalloc default behavior, holds memory longer)
+  - 1000 = our default (1 second, 10x more aggressive than jemalloc's 10s default)
+- `MuzzyDecayMs` - Time in milliseconds before muzzy pages are purged (same options)
+
+Dirty pages contain recently freed data. Muzzy pages are dirty pages that have been
+purged but the virtual memory mapping is retained for potential reuse.
+
+Example:
+```erlang
+%% Most aggressive - immediate return to OS
+cozodb:set_jemalloc_decay(0, 0).
+
+%% Default (set at NIF load time)
+cozodb:set_jemalloc_decay(1000, 1000).
+
+%% jemalloc default - least aggressive
+cozodb:set_jemalloc_decay(10000, 10000).
+```
+
+Returns:
+- `ok` - Settings applied successfully
+- `{error, not_jemalloc}` - Not using jemalloc allocator
+- `{error, Reason}` - Other error
+""".
+-spec set_jemalloc_decay(DirtyDecayMs :: integer(), MuzzyDecayMs :: integer()) ->
+    ok | {error, term()}.
+
+set_jemalloc_decay(DirtyDecayMs, MuzzyDecayMs) when
+    is_integer(DirtyDecayMs), is_integer(MuzzyDecayMs)
+->
+    set_jemalloc_decay_nif(DirtyDecayMs, MuzzyDecayMs).
+
+-doc """
+Get current jemalloc decay settings.
+
+Returns:
+- `{ok, #{dirty_decay_ms => integer(), muzzy_decay_ms => integer()}}` - Current settings
+- `{error, not_jemalloc}` - Not using jemalloc allocator
+""".
+-spec get_jemalloc_decay() -> {ok, map()} | {error, term()}.
+
+get_jemalloc_decay() ->
+    get_jemalloc_decay_nif().
+
 
 %% =============================================================================
 %% API: Utils
@@ -1075,32 +1389,11 @@ init() ->
     ?load_nif_from_crate(Crate, 0).
 
 %% @private
-%% Calls native/cozodb/src/lib.rs::new
--spec new_nif(Engine :: binary(), Path :: binary(), Opts :: binary()) ->
-    {ok, db_handle()} | {error, Reason :: any()}.
-
-new_nif(_Engine, _Path, _Opts) ->
-    ?NIF_NOT_LOADED.
-
-%% @private
--spec resource_nif(DbHandle :: db_handle()) ->
+%% Calls native/cozodb/src/lib.rs::open_res_with_options - returns ResourceArc directly (no HANDLES)
+-spec open_res_opts_nif(Engine :: binary(), Path :: binary(), Opts :: binary()) ->
     {ok, reference()} | {error, Reason :: any()}.
 
-resource_nif(_DbHandle) ->
-    ?NIF_NOT_LOADED.
-
-%% @private
--spec info_nif(DbHandle :: db_handle()) ->
-    #{engine := binary(), path := binary()}.
-
-info_nif(_DbHandle) ->
-    ?NIF_NOT_LOADED.
-
-%% @private
--spec close_nif(DbHandle :: db_handle()) ->
-    {ok, info()} | {error, Reason :: any()}.
-
-close_nif(_DbHandle) ->
+open_res_opts_nif(_Engine, _Path, _Opts) ->
     ?NIF_NOT_LOADED.
 
 %% @private
@@ -1110,8 +1403,9 @@ run_script_span(DbHandle, Script, Params, ReadOnly, Meta) when
     run_script_span(DbHandle, Script, maps:from_list(Params), ReadOnly, Meta);
 
 run_script_span(DbHandle, Script, Params, ReadOnly, Meta) when is_map(Params) ->
+    Resource = ?GET_RESOURCE(DbHandle),
     telemetry:span([cozodb, run], Meta, fun() ->
-        case run_script_nif(DbHandle, Script, Params, ReadOnly) of
+        case run_script_res_nif(Resource, Script, Params, ReadOnly) of
             {ok, _} = OK ->
                 {OK, Meta};
 
@@ -1123,108 +1417,164 @@ run_script_span(DbHandle, Script, Params, ReadOnly, Meta) when is_map(Params) ->
     end).
 
 %% @private
-%% Calls native/cozodb/src/lib.rs::run_script
--spec run_script_nif(
-    DbHandle :: db_handle(),
+-spec memory_stats_nif() ->
+    {ok, map()} | {error, term()}.
+
+memory_stats_nif() ->
+    ?NIF_NOT_LOADED.
+
+%% @private
+-spec dump_heap_profile_nif(Path :: binary()) ->
+    {ok, binary()} | {error, term()}.
+
+dump_heap_profile_nif(_Path) ->
+    ?NIF_NOT_LOADED.
+
+%% @private
+-spec clear_block_cache_nif() -> ok.
+
+clear_block_cache_nif() ->
+    ?NIF_NOT_LOADED.
+
+%% @private
+-spec set_block_cache_capacity_nif(CapacityMB :: non_neg_integer()) -> ok.
+
+set_block_cache_capacity_nif(_CapacityMB) ->
+    ?NIF_NOT_LOADED.
+
+%% @private
+-spec get_block_cache_stats_nif() -> {ok, map()}.
+
+get_block_cache_stats_nif() ->
+    ?NIF_NOT_LOADED.
+
+%% @private
+-spec purge_jemalloc_nif() -> {ok, non_neg_integer()} | {error, term()}.
+
+purge_jemalloc_nif() ->
+    ?NIF_NOT_LOADED.
+
+%% @private
+-spec set_jemalloc_decay_nif(DirtyDecayMs :: integer(), MuzzyDecayMs :: integer()) ->
+    ok | {error, term()}.
+
+set_jemalloc_decay_nif(_DirtyDecayMs, _MuzzyDecayMs) ->
+    ?NIF_NOT_LOADED.
+
+%% @private
+-spec get_jemalloc_decay_nif() -> {ok, map()} | {error, term()}.
+
+get_jemalloc_decay_nif() ->
+    ?NIF_NOT_LOADED.
+
+%% -----------------------------------------------------------------------------
+%% Resource-based NIF stubs (lock-free operations)
+%% -----------------------------------------------------------------------------
+
+%% @private
+%% Calls native/cozodb/src/lib.rs::run_script_res
+-spec run_script_res_nif(
+    Resource :: reference(),
     Script :: binary(),
     Params :: map(),
     ReadOnly :: boolean()
-) ->
-    query_return().
+) -> query_return().
 
-run_script_nif(_DbHandle, _Script, _Params, _ReadOnly) ->
+run_script_res_nif(_Resource, _Script, _Params, _ReadOnly) ->
     ?NIF_NOT_LOADED.
 
 %% @private
-%% Calls native/cozodb/src/lib.rs::run_script_json
--spec run_script_json_nif(
-    DbHandle :: db_handle(),
+%% Calls native/cozodb/src/lib.rs::run_script_str_res
+-spec run_script_str_res_nif(
+    Resource :: reference(),
     Script :: binary(),
     Params :: binary(),
     ReadOnly :: boolean()
-) ->
-    {ok, Json :: binary()}.
+) -> {ok, binary()}.
 
-run_script_json_nif(_DbHandle, _Script, _Params, _ReadOnly) ->
+run_script_str_res_nif(_Resource, _Script, _Params, _ReadOnly) ->
     ?NIF_NOT_LOADED.
 
 %% @private
-%% Calls native/cozodb/src/lib.rs::run_script_json
--spec run_script_str_nif(
-    DbHandle :: db_handle(),
+%% Calls native/cozodb/src/lib.rs::run_script_json_res
+-spec run_script_json_res_nif(
+    Resource :: reference(),
     Script :: binary(),
     Params :: binary(),
     ReadOnly :: boolean()
-) ->
-    {ok, Json :: binary()}.
+) -> {ok, binary()}.
 
-run_script_str_nif(_DbHandle, _Script, _Params, _ReadOnly) ->
+run_script_json_res_nif(_Resource, _Script, _Params, _ReadOnly) ->
     ?NIF_NOT_LOADED.
 
 %% @private
-%% Calls native/cozodb/src/lib.rs::run_script
--spec parse_sparql_nif(DbHandle :: db_handle(), Query :: binary()) ->
-    {ok, Script :: binary()}.
-
-parse_sparql_nif(_DbHandle, _Query) ->
-    ?NIF_NOT_LOADED.
-
-%% @private
--spec import_relations_nif(DbHandle :: db_handle(), Relations :: string()) ->
+-spec import_relations_res_nif(Resource :: reference(), Relations :: binary()) ->
     ok | {error, Reason :: any()}.
 
-import_relations_nif(_DbHandle, _Relations) ->
+import_relations_res_nif(_Resource, _Relations) ->
     ?NIF_NOT_LOADED.
 
 %% @private
--spec export_relations_nif(DbHandle :: db_handle(), Relations :: binary()) ->
-    {ok, relations()} | {error, Reason :: any()}.
+-spec export_relations_res_nif(Resource :: reference(), Relations :: [binary()]) ->
+    {ok, map()} | {error, Reason :: any()}.
 
-export_relations_nif(_DbHandle, _Relations) ->
+export_relations_res_nif(_Resource, _Relations) ->
     ?NIF_NOT_LOADED.
 
 %% @private
--spec export_relations_json_nif(DbHandle :: db_handle(), EncRelNames :: binary()) ->
-    {ok, relations()} | {error, Reason :: any()}.
+-spec export_relations_json_res_nif(Resource :: reference(), Relations :: [binary()]) ->
+    {ok, binary()} | {error, Reason :: any()}.
 
-export_relations_json_nif(_DbHandle, _EncRelNames) ->
+export_relations_json_res_nif(_Resource, _Relations) ->
     ?NIF_NOT_LOADED.
 
 %% @private
--spec backup_nif(DbHandle :: db_handle(), Path :: path()) ->
+-spec backup_res_nif(Resource :: reference(), Path :: binary()) ->
     ok | {error, Reason :: any()}.
 
-backup_nif(_DbHandle, _Path) ->
+backup_res_nif(_Resource, _Path) ->
     ?NIF_NOT_LOADED.
 
 %% @private
--spec restore_nif(DbHandle :: db_handle(), Path :: path()) ->
+-spec restore_res_nif(Resource :: reference(), Path :: binary()) ->
     ok | {error, Reason :: any()}.
 
-restore_nif(_DbHandle, _Path) ->
+restore_res_nif(_Resource, _Path) ->
     ?NIF_NOT_LOADED.
 
 %% @private
--spec import_from_backup_nif(
-    DbHandle :: db_handle(), Path :: binary(), Relations :: binary()
-) ->
+-spec import_from_backup_res_nif(Resource :: reference(), Path :: binary(), Relations :: [binary()]) ->
     ok | {error, Reason :: any()}.
 
-import_from_backup_nif(_DbHandle, _Path, _Relations) ->
+import_from_backup_res_nif(_Resource, _Path, _Relations) ->
     ?NIF_NOT_LOADED.
 
 %% @private
--spec register_callback_nif(DbHandle :: db_handle(), RelName :: binary()) ->
-    ok.
+-spec register_callback_res_nif(Resource :: reference(), RelName :: binary()) ->
+    {ok, integer()}.
 
-register_callback_nif(_DbHandle, _RelName) ->
+register_callback_res_nif(_Resource, _RelName) ->
     ?NIF_NOT_LOADED.
 
 %% @private
--spec unregister_callback_nif(DbHandle :: db_handle(), Id :: integer()) ->
-    ok.
+-spec unregister_callback_res_nif(Resource :: reference(), Id :: integer()) ->
+    boolean().
 
-unregister_callback_nif(_DbHandle, _Id) ->
+unregister_callback_res_nif(_Resource, _Id) ->
+    ?NIF_NOT_LOADED.
+
+%% @private
+-spec flush_memtables_res_nif(Resource :: reference()) ->
+    ok | {error, term()}.
+
+flush_memtables_res_nif(_Resource) ->
+    ?NIF_NOT_LOADED.
+
+%% @private
+-spec rocksdb_memory_stats_res_nif(Resource :: reference()) ->
+    {ok, map()} | {error, term()}.
+
+rocksdb_memory_stats_res_nif(_Resource) ->
     ?NIF_NOT_LOADED.
 
 %% =============================================================================
@@ -1232,11 +1582,19 @@ unregister_callback_nif(_DbHandle, _Id) ->
 %% =============================================================================
 
 %% @private
+%% Opens a database and returns a handle containing the ResourceArc.
+%% This uses the lock-free path internally - no HANDLES mutex.
 new(Engine, Path, Opts) when
     is_binary(Engine), is_binary(Path), is_binary(Opts)
 ->
     try
-        new_nif(Engine, Path, Opts)
+        case open_res_opts_nif(Engine, Path, Opts) of
+            {ok, Resource} ->
+                %% Wrap in a map to maintain backwards-compatible API
+                {ok, #{resource => Resource, engine => Engine, path => Path}};
+            {error, _} = Error ->
+                Error
+        end
     catch
         Class:Reason:Stacktrace ->
             ?LOG_ERROR(#{
