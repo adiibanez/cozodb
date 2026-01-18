@@ -16,13 +16,38 @@
 // limitations under the License.
 // =============================================================================
 
-// Use jemalloc as the global allocator when the feature is enabled
-// This provides better memory management under high concurrency but may retain more memory
-// Disable with: cargo build --no-default-features --features "..."
-#[cfg(all(feature = "jemalloc", not(target_env = "msvc")))]
+// =============================================================================
+// GLOBAL ALLOCATOR CONFIGURATION
+// =============================================================================
+//
+// We support two allocator modes:
+//
+// 1. nif_alloc (default): Use Erlang's allocator via rustler::EnifAllocator
+//    - Rust allocations are tracked by the BEAM
+//    - Memory is returned when Erlang GCs
+//    - Better integration with Erlang's memory management
+//
+// 2. jemalloc (default): Use jemalloc for all Rust allocations
+//    - Best performance under high allocation rates
+//    - Unified with RocksDB's allocator (via rocksdb-jemalloc feature)
+//    - Configured with 0ms decay for immediate memory return to OS
+//    - Override via COZODB_JEMALLOC_DIRTY_DECAY_MS / COZODB_JEMALLOC_MUZZY_DECAY_MS
+//
+// When nif_alloc is enabled, it takes precedence over jemalloc for Rust.
+// RocksDB (C++) can still use jemalloc independently via rocksdb-jemalloc.
+// =============================================================================
+
+// Option 1: Use Erlang's allocator for Rust (nif_alloc feature, default)
+// This forwards all Rust allocations to Erlang's enif_alloc/enif_free
+#[cfg(feature = "nif_alloc")]
+#[global_allocator]
+static GLOBAL: rustler::EnifAllocator = rustler::EnifAllocator;
+
+// Option 2: Use jemalloc for Rust (only when jemalloc is enabled AND nif_alloc is disabled)
+#[cfg(all(feature = "jemalloc", not(feature = "nif_alloc"), not(target_env = "msvc")))]
 use tikv_jemallocator::Jemalloc;
 
-#[cfg(all(feature = "jemalloc", not(target_env = "msvc")))]
+#[cfg(all(feature = "jemalloc", not(feature = "nif_alloc"), not(target_env = "msvc")))]
 #[global_allocator]
 static GLOBAL: Jemalloc = Jemalloc;
 
@@ -110,7 +135,8 @@ fn on_load(env: Env, _: Term) -> bool {
     rustler::resource!(DbHandleResource, env);
 
     // Configure jemalloc for more aggressive memory return to OS
-    #[cfg(all(feature = "jemalloc", not(target_env = "msvc")))]
+    // Only when jemalloc is the global allocator (not when using nif_alloc)
+    #[cfg(all(feature = "jemalloc", not(feature = "nif_alloc"), not(target_env = "msvc")))]
     {
         configure_jemalloc_decay();
     }
@@ -130,21 +156,23 @@ fn on_load(env: Env, _: Term) -> bool {
 ///
 /// Set to 0 for immediate return (may impact performance under high allocation rates)
 /// Set to -1 to disable decay (jemalloc default behavior, holds memory longer)
-#[cfg(all(feature = "jemalloc", not(target_env = "msvc")))]
+#[cfg(all(feature = "jemalloc", not(feature = "nif_alloc"), not(target_env = "msvc")))]
 fn configure_jemalloc_decay() {
     use std::env;
 
-    // Default to 1000ms (1 second) - much more aggressive than jemalloc's 10s default
-    // but not so aggressive as to hurt performance
+    // Default to 0ms (immediate return) - most aggressive memory return
+    // This may impact performance under very high allocation rates but ensures
+    // memory is returned to the OS as soon as it's freed.
+    // Use environment variables to tune if performance is impacted.
     let dirty_decay_ms: i64 = env::var("COZODB_JEMALLOC_DIRTY_DECAY_MS")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or(1000);
+        .unwrap_or(0);
 
     let muzzy_decay_ms: i64 = env::var("COZODB_JEMALLOC_MUZZY_DECAY_MS")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or(1000);
+        .unwrap_or(0);
 
     // Apply decay settings to all arenas
     if let Err(e) = set_jemalloc_decay(dirty_decay_ms, muzzy_decay_ms) {
@@ -153,7 +181,8 @@ fn configure_jemalloc_decay() {
 }
 
 /// Set jemalloc decay times for all arenas
-#[cfg(all(feature = "jemalloc", not(target_env = "msvc")))]
+/// Only available when jemalloc is the global allocator
+#[cfg(all(feature = "jemalloc", not(feature = "nif_alloc"), not(target_env = "msvc")))]
 fn set_jemalloc_decay(dirty_decay_ms: i64, muzzy_decay_ms: i64) -> Result<(), String> {
     use tikv_jemalloc_ctl::raw;
 
@@ -908,7 +937,7 @@ fn rocksdb_memory_stats_res<'a>(
 }
 
 /// Returns memory statistics.
-/// When jemalloc is enabled, returns detailed allocator stats.
+/// Reports the Rust allocator type and jemalloc stats when available.
 #[rustler::nif(name = "memory_stats_nif")]
 fn memory_stats<'a>(env: Env<'a>) -> NifResult<Term<'a>> {
     let registrations_count = {
@@ -919,46 +948,37 @@ fn memory_stats<'a>(env: Env<'a>) -> NifResult<Term<'a>> {
     let mut map = rustler::types::map::map_new(env);
     map = map.map_put("callback_registrations".encode(env), registrations_count.encode(env)).unwrap();
 
-    // Add jemalloc stats when the feature is enabled
-    #[cfg(all(feature = "jemalloc", not(target_env = "msvc")))]
+    // Report which allocator Rust is using
+    #[cfg(feature = "nif_alloc")]
     {
-        use tikv_jemalloc_ctl::{epoch, stats};
-
-        // Advance the epoch to get fresh stats
-        if let Ok(e) = epoch::mib() {
-            let _ = e.advance();
-        }
-
-        map = map.map_put("allocator".encode(env), "jemalloc".encode(env)).unwrap();
-
-        // allocated: Total number of bytes allocated by the application
-        if let Ok(allocated) = stats::allocated::read() {
-            map = map.map_put("allocated".encode(env), allocated.encode(env)).unwrap();
-        }
-
-        // active: Total number of bytes in active pages allocated by the application
-        if let Ok(active) = stats::active::read() {
-            map = map.map_put("active".encode(env), active.encode(env)).unwrap();
-        }
-
-        // resident: Total number of bytes in physically resident data pages mapped
-        if let Ok(resident) = stats::resident::read() {
-            map = map.map_put("resident".encode(env), resident.encode(env)).unwrap();
-        }
-
-        // mapped: Total number of bytes in active extents mapped by the allocator
-        if let Ok(mapped) = stats::mapped::read() {
-            map = map.map_put("mapped".encode(env), mapped.encode(env)).unwrap();
-        }
-
-        // retained: Total number of bytes in virtual memory mappings that were
-        // retained rather than returned to the OS
-        if let Ok(retained) = stats::retained::read() {
-            map = map.map_put("retained".encode(env), retained.encode(env)).unwrap();
-        }
+        // Rust uses Erlang's allocator (EnifAllocator)
+        map = map.map_put("rust_allocator".encode(env), "erlang".encode(env)).unwrap();
     }
 
-    #[cfg(not(all(feature = "jemalloc", not(target_env = "msvc"))))]
+    #[cfg(all(feature = "jemalloc", not(feature = "nif_alloc"), not(target_env = "msvc")))]
+    {
+        // Rust uses jemalloc
+        map = map.map_put("rust_allocator".encode(env), "jemalloc".encode(env)).unwrap();
+    }
+
+    #[cfg(all(not(feature = "nif_alloc"), not(all(feature = "jemalloc", not(target_env = "msvc")))))]
+    {
+        // Rust uses system allocator
+        map = map.map_put("rust_allocator".encode(env), "system".encode(env)).unwrap();
+    }
+
+    // For backwards compatibility, also set "allocator" key
+    #[cfg(feature = "nif_alloc")]
+    {
+        map = map.map_put("allocator".encode(env), "erlang".encode(env)).unwrap();
+    }
+
+    #[cfg(all(feature = "jemalloc", not(feature = "nif_alloc"), not(target_env = "msvc")))]
+    {
+        map = map.map_put("allocator".encode(env), "jemalloc".encode(env)).unwrap();
+    }
+
+    #[cfg(all(not(feature = "nif_alloc"), not(all(feature = "jemalloc", not(target_env = "msvc")))))]
     {
         map = map.map_put("allocator".encode(env), "system".encode(env)).unwrap();
     }
@@ -979,9 +999,12 @@ fn memory_stats<'a>(env: Env<'a>) -> NifResult<Term<'a>> {
 ///   {:error, :profiling_not_enabled} - jemalloc profiling not enabled (need MALLOC_CONF=prof:true)
 ///   {:error, :not_jemalloc} - Not using jemalloc allocator
 ///   {:error, reason} - Other error
+///
+/// Note: Only available when jemalloc is the global allocator (not when using nif_alloc).
 #[rustler::nif(name = "dump_heap_profile_nif")]
 fn dump_heap_profile<'a>(env: Env<'a>, path: String) -> NifResult<Term<'a>> {
-    #[cfg(all(feature = "jemalloc", not(target_env = "msvc")))]
+    // Only available when jemalloc is the global allocator
+    #[cfg(all(feature = "jemalloc", not(feature = "nif_alloc"), not(target_env = "msvc")))]
     {
         use std::ffi::CString;
 
@@ -1028,7 +1051,15 @@ fn dump_heap_profile<'a>(env: Env<'a>, path: String) -> NifResult<Term<'a>> {
         }
     }
 
-    #[cfg(not(all(feature = "jemalloc", not(target_env = "msvc"))))]
+    // When nif_alloc is enabled, jemalloc isn't the global allocator
+    #[cfg(feature = "nif_alloc")]
+    {
+        let _ = path; // suppress unused warning
+        Ok((atoms::error(), "using_erlang_allocator".encode(env)).encode(env))
+    }
+
+    // Fallback for other cases (no jemalloc at all)
+    #[cfg(all(not(feature = "nif_alloc"), not(all(feature = "jemalloc", not(target_env = "msvc")))))]
     {
         let _ = path; // suppress unused warning
         Ok((atoms::error(), "not_jemalloc".encode(env)).encode(env))
@@ -1090,9 +1121,13 @@ fn get_block_cache_stats<'a>(env: Env<'a>) -> NifResult<Term<'a>> {
 /// This purges dirty pages from all arenas, making them available to the OS.
 ///
 /// Returns: {:ok, purged_bytes} on success, {:error, reason} on failure.
+///
+/// Note: Only available when jemalloc is the global allocator (not when using nif_alloc).
+/// When using Erlang's allocator, memory is managed by the BEAM and returned via GC.
 #[rustler::nif(name = "purge_jemalloc_nif")]
 fn purge_jemalloc<'a>(env: Env<'a>) -> NifResult<Term<'a>> {
-    #[cfg(all(feature = "jemalloc", not(target_env = "msvc")))]
+    // Only available when jemalloc is the global allocator
+    #[cfg(all(feature = "jemalloc", not(feature = "nif_alloc"), not(target_env = "msvc")))]
     {
         use std::ffi::CString;
 
@@ -1132,7 +1167,14 @@ fn purge_jemalloc<'a>(env: Env<'a>) -> NifResult<Term<'a>> {
         }
     }
 
-    #[cfg(not(all(feature = "jemalloc", not(target_env = "msvc"))))]
+    // When nif_alloc is enabled, jemalloc isn't the global allocator
+    #[cfg(feature = "nif_alloc")]
+    {
+        Ok((atoms::error(), "using_erlang_allocator".encode(env)).encode(env))
+    }
+
+    // Fallback for other cases (no jemalloc at all)
+    #[cfg(all(not(feature = "nif_alloc"), not(all(feature = "jemalloc", not(target_env = "msvc")))))]
     {
         Ok((atoms::error(), "not_jemalloc".encode(env)).encode(env))
     }
@@ -1149,13 +1191,16 @@ fn purge_jemalloc<'a>(env: Env<'a>) -> NifResult<Term<'a>> {
 /// Lower values = more aggressive memory return to OS (may impact performance)
 /// Higher values = better performance but higher memory usage
 /// Default jemalloc is 10000ms (10 seconds), we default to 1000ms (1 second)
+///
+/// Note: Only available when jemalloc is the global allocator (not when using nif_alloc).
 #[rustler::nif(name = "set_jemalloc_decay_nif")]
 fn set_jemalloc_decay_nif<'a>(
     env: Env<'a>,
     dirty_decay_ms: i64,
     muzzy_decay_ms: i64,
 ) -> NifResult<Term<'a>> {
-    #[cfg(all(feature = "jemalloc", not(target_env = "msvc")))]
+    // Only available when jemalloc is the global allocator
+    #[cfg(all(feature = "jemalloc", not(feature = "nif_alloc"), not(target_env = "msvc")))]
     {
         match set_jemalloc_decay(dirty_decay_ms, muzzy_decay_ms) {
             Ok(()) => Ok(atoms::ok().encode(env)),
@@ -1163,8 +1208,17 @@ fn set_jemalloc_decay_nif<'a>(
         }
     }
 
-    #[cfg(not(all(feature = "jemalloc", not(target_env = "msvc"))))]
+    // When nif_alloc is enabled, jemalloc isn't the global allocator
+    #[cfg(feature = "nif_alloc")]
     {
+        let _ = (dirty_decay_ms, muzzy_decay_ms); // Suppress unused warnings
+        Ok((atoms::error(), "using_erlang_allocator".encode(env)).encode(env))
+    }
+
+    // Fallback for other cases (no jemalloc at all)
+    #[cfg(all(not(feature = "nif_alloc"), not(all(feature = "jemalloc", not(target_env = "msvc")))))]
+    {
+        let _ = (dirty_decay_ms, muzzy_decay_ms); // Suppress unused warnings
         Ok((atoms::error(), "not_jemalloc".encode(env)).encode(env))
     }
 }
@@ -1172,9 +1226,12 @@ fn set_jemalloc_decay_nif<'a>(
 /// Get current jemalloc decay settings.
 ///
 /// Returns: {:ok, #{dirty_decay_ms => integer(), muzzy_decay_ms => integer()}}
+///
+/// Note: Only available when jemalloc is the global allocator (not when using nif_alloc).
 #[rustler::nif(name = "get_jemalloc_decay_nif")]
 fn get_jemalloc_decay_nif<'a>(env: Env<'a>) -> NifResult<Term<'a>> {
-    #[cfg(all(feature = "jemalloc", not(target_env = "msvc")))]
+    // Only available when jemalloc is the global allocator
+    #[cfg(all(feature = "jemalloc", not(feature = "nif_alloc"), not(target_env = "msvc")))]
     {
         use tikv_jemalloc_ctl::raw;
 
@@ -1195,7 +1252,14 @@ fn get_jemalloc_decay_nif<'a>(env: Env<'a>) -> NifResult<Term<'a>> {
         Ok((atoms::ok(), map).encode(env))
     }
 
-    #[cfg(not(all(feature = "jemalloc", not(target_env = "msvc"))))]
+    // When nif_alloc is enabled, jemalloc isn't the global allocator
+    #[cfg(feature = "nif_alloc")]
+    {
+        Ok((atoms::error(), "using_erlang_allocator".encode(env)).encode(env))
+    }
+
+    // Fallback for other cases (no jemalloc at all)
+    #[cfg(all(not(feature = "nif_alloc"), not(all(feature = "jemalloc", not(target_env = "msvc")))))]
     {
         Ok((atoms::error(), "not_jemalloc".encode(env)).encode(env))
     }

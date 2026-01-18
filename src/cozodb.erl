@@ -168,7 +168,11 @@ just cached. The decay times control how long this memory is held:
 - **Muzzy pages**: Dirty pages that have been purged but VM mapping is retained
 
 By default, jemalloc holds memory for 10 seconds before returning it to the OS.
-This NIF configures a more aggressive default of 1 second (1000ms).
+This NIF configures the most aggressive setting: **0ms (immediate return)**.
+
+This ensures memory is returned to the OS as soon as it's freed, which is important
+for long-running Erlang applications where memory visibility and predictable resource
+usage are critical.
 
 ### Tuning Memory Return
 
@@ -177,18 +181,18 @@ You can control memory return behavior at runtime:
 ```erlang
 %% Check current decay settings
 {ok, Settings} = cozodb:get_jemalloc_decay().
-%% #{<<"dirty_decay_ms">> => 1000, <<"muzzy_decay_ms">> => 1000}
+%% #{<<"dirty_decay_ms">> => 0, <<"muzzy_decay_ms">> => 0}
 
-%% Most aggressive - immediate return to OS
-%% Lower memory usage but may reduce throughput under high allocation rates
+%% Most aggressive - immediate return to OS (our default)
+%% Lowest memory usage, optimal for most Erlang applications
 ok = cozodb:set_jemalloc_decay(0, 0).
 
-%% Balanced (our default) - 1 second decay
-%% Good balance between memory usage and performance
+%% Balanced - 1 second decay
+%% Slight performance improvement under very high allocation rates
 ok = cozodb:set_jemalloc_decay(1000, 1000).
 
 %% Less aggressive - original jemalloc default (10 seconds)
-%% Best performance but higher memory retention
+%% Best performance but significantly higher memory retention
 ok = cozodb:set_jemalloc_decay(10000, 10000).
 
 %% Disable decay entirely - maximum memory retention
@@ -199,17 +203,17 @@ ok = cozodb:set_jemalloc_decay(-1, -1).
 
 Default decay times can be overridden at startup via environment variables:
 
-- `COZODB_JEMALLOC_DIRTY_DECAY_MS` - Dirty page decay time (default: 1000)
-- `COZODB_JEMALLOC_MUZZY_DECAY_MS` - Muzzy page decay time (default: 1000)
+- `COZODB_JEMALLOC_DIRTY_DECAY_MS` - Dirty page decay time (default: 0)
+- `COZODB_JEMALLOC_MUZZY_DECAY_MS` - Muzzy page decay time (default: 0)
 
-Example: `COZODB_JEMALLOC_DIRTY_DECAY_MS=0 COZODB_JEMALLOC_MUZZY_DECAY_MS=0 rebar3 shell`
+Example: `COZODB_JEMALLOC_DIRTY_DECAY_MS=1000 COZODB_JEMALLOC_MUZZY_DECAY_MS=1000 rebar3 shell`
 
 ### Recommended Tuning Strategy
 
-1. **High-throughput workloads**: Use higher decay times (5000-10000ms) for better performance
-2. **Memory-constrained environments**: Use lower decay times (0-1000ms) or call `purge_jemalloc/0` periodically
-3. **Bursty workloads**: The default 1000ms works well; memory is returned within a second of load reduction
-4. **Testing/debugging memory**: Set to 0 and call `purge_jemalloc/0` to see actual memory usage
+1. **Most applications**: Use the default (0ms) - immediate memory return with excellent throughput
+2. **Extreme high-throughput**: If you observe performance issues, try 1000ms decay
+3. **Memory debugging**: The default 0ms shows actual memory usage; call `purge_jemalloc/0` to force cleanup
+4. **Benchmarking**: Compare 0ms vs 1000ms to find optimal setting for your workload
 
 ## System Operations
 * Query Management: Monitor running queries with running/1 and terminate problematic queries using kill/2.

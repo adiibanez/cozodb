@@ -11,7 +11,7 @@ path = "src/lib.rs"
 crate-type = ["cdylib"]
 
 [dependencies]
-rustler = {version = "0.36.2", features = ["nif_version_2_17"]}
+rustler = {version = "=0.37.0", features = ["nif_version_2_17"]}
 # Using local path temporarily to test new memory stats functionality
 cozo = {git = "https://github.com/aramallo/cozo.git", tag = "v0.8.1-leapsight" }
 uuid = "1.3.3"
@@ -44,8 +44,17 @@ default = [
     "cozo/storage-sqlite",
     "cozo/storage-rocksdb",
     "cozo/graph-algo",
-    "jemalloc"  # Unified jemalloc for both Rust and RocksDB (C++)
+    "jemalloc"  # jemalloc with 0ms decay: best throughput + low memory retention
 ]
+
+# Use Erlang's allocator (EnifAllocator from rustler 0.37+) for Rust allocations.
+# This allows:
+# 1. Rust NIF allocations are tracked by the BEAM
+# 2. Memory is returned more predictably when Erlang GCs
+# 3. Better integration with Erlang's memory management
+#
+# RocksDB (C++) still uses its own memory management, but jemalloc is optional.
+nif_alloc = []
 
 # Use jemalloc as the global allocator for the entire process.
 # This enables:
@@ -53,12 +62,15 @@ default = [
 # 2. RocksDB C++ allocations also use jemalloc (via cozo/rocksdb-jemalloc feature)
 # 3. Unified memory statistics and purge capabilities
 #
-# Note: We use cozo/rocksdb-jemalloc (not cozo/jemalloc) because cozo/jemalloc would
-# bring in tikv-jemallocator-global which conflicts with our own global allocator.
-# The rocksdb-jemalloc feature enables ROCKSDB_JEMALLOC defines for C++ code only.
+# Note: When both nif_alloc and jemalloc are enabled, nif_alloc takes precedence
+# and jemalloc is only used for RocksDB (C++).
 #
-# Disable with: --no-default-features --features "cozo/storage-sqlite,cozo/storage-rocksdb,cozo/graph-algo"
+# For pure jemalloc mode: --no-default-features --features "cozo/storage-sqlite,cozo/storage-rocksdb,cozo/graph-algo,jemalloc"
 jemalloc = ["tikv-jemallocator", "tikv-jemalloc-ctl", "tikv-jemalloc-sys", "cozo/rocksdb-jemalloc"]
+
+# Hybrid mode: Erlang allocator for Rust + jemalloc for RocksDB
+# This gives best of both worlds: BEAM-tracked Rust memory + jemalloc stats for RocksDB
+nif_alloc_rocksdb_jemalloc = ["nif_alloc", "tikv-jemalloc-ctl", "tikv-jemalloc-sys", "cozo/rocksdb-jemalloc"]
 
 [target.'cfg(target_os = "linux")'.dependencies]
 cozo = { git = "https://github.com/aramallo/cozo.git", tag = "v0.8.1-leapsight", features = ["io-uring"] }

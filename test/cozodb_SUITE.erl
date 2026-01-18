@@ -968,6 +968,7 @@ rocksdb(Config) ->
     %%           "[3, 'c', 'C'],"
     %%           "[4, 'd', 'D']]"),
     cozodb:close(Db),
+    erlang:garbage_collect(),
 
     {ok, Db2} = cozodb:open(rocksdb, DbPath),
     #{path := DbPath} = cozodb:info(Db2),
