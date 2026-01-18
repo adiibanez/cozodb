@@ -2,12 +2,45 @@ REBAR3 ?= $(shell test -e `which rebar3` 2>/dev/null && which rebar3 || echo "./
 
 COZODB_TMP_DIR ?= "/tmp/cozodb/"
 
+# RocksDB backend selection:
+#   COZODB_BACKEND=rocksdb (default) - Use cozorocks C++ FFI bridge
+#   COZODB_BACKEND=newrocksdb        - Use rust-rocksdb crate with env var config
+#
+# IMPORTANT: The two backends are MUTUALLY EXCLUSIVE due to allocator conflicts.
+COZODB_BACKEND ?= rocksdb
+
+# Cargo feature flags based on selected backend
+ifeq ($(COZODB_BACKEND),newrocksdb)
+CARGO_FEATURES := --no-default-features --features "new-rocksdb-default"
+else
+CARGO_FEATURES :=
+endif
+
 .PHONY: all
 all: build
 
 .PHONY: build
-build: $(REBAR3)
+build: cargo-build
 	@$(REBAR3) compile
+
+# Build with the selected backend (controlled by COZODB_BACKEND env var)
+.PHONY: cargo-build
+cargo-build:
+	@echo "Building with COZODB_BACKEND=$(COZODB_BACKEND)"
+	cd native/cozodb && cargo build --release $(CARGO_FEATURES)
+	@mkdir -p priv/crates/cozodb
+	@cp native/cozodb/target/release/libcozodb.so priv/crates/cozodb/cozodb.so 2>/dev/null || \
+	 cp native/cozodb/target/release/libcozodb.dylib priv/crates/cozodb/cozodb.so 2>/dev/null || \
+	 cp native/cozodb/target/release/cozodb.dll priv/crates/cozodb/cozodb.so 2>/dev/null || true
+
+# Convenience targets for specific backends
+.PHONY: build-rocksdb
+build-rocksdb:
+	@COZODB_BACKEND=rocksdb $(MAKE) build
+
+.PHONY: build-newrocksdb
+build-newrocksdb:
+	@COZODB_BACKEND=newrocksdb $(MAKE) build
 
 .PHONY: deps
 deps:

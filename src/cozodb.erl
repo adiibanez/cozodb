@@ -286,7 +286,11 @@ COZODB_JEMALLOC_NARENAS=8 rebar3 shell
     | {tuple, [column_atomic_type()]}
     | {vector, 32 | 64, Size :: pos_integer()}.
 
--type engine() :: mem | sqlite | rocksdb.
+-type engine() :: mem | sqlite | rocksdb | newrocksdb.
+%% mem - In-memory storage (no persistence)
+%% sqlite - SQLite backend (good for small datasets, single-writer)
+%% rocksdb - RocksDB via cozorocks C++ FFI (current default, high-performance)
+%% newrocksdb - RocksDB via rust-rocksdb crate (comprehensive env var config)
 -type engine_opts() :: map().
 -type path() :: file:filename() | binary().
 -type index_spec() ::
@@ -539,9 +543,88 @@ to release the allocated ErlNIF resources.
 * `Path` is ignored when `Engine` is `mem`
 * `Opts` apply only to `tikv` engine
 
-### RocksDB
+## Engines
+
+### `rocksdb` (cozorocks)
+The original RocksDB backend using the cozorocks C++ FFI bridge.
 To define options for RocksDB you should make sure a RocksDB configuration file
 named `config` is present at `Path` before you call this function.
+
+### `newrocksdb` (rust-rocksdb)
+An alternative RocksDB backend using the official rust-rocksdb crate.
+This engine supports comprehensive configuration via environment variables.
+
+All options are configured using `COZO_ROCKSDB_*` environment variables:
+
+#### General Options
+- `COZO_ROCKSDB_CREATE_IF_MISSING` - Create DB if not exists (default: true for new)
+- `COZO_ROCKSDB_PARANOID_CHECKS` - Enable paranoid checks (default: false)
+- `COZO_ROCKSDB_MAX_OPEN_FILES` - Max open file handles (default: -1 unlimited)
+- `COZO_ROCKSDB_MAX_FILE_OPENING_THREADS` - Threads for opening files
+
+#### Parallelism
+- `COZO_ROCKSDB_PARALLELISM` - Set overall parallelism level
+- `COZO_ROCKSDB_MAX_BACKGROUND_JOBS` - Max background jobs
+- `COZO_ROCKSDB_MAX_SUBCOMPACTIONS` - Max subcompactions
+
+#### Write Buffer
+- `COZO_ROCKSDB_WRITE_BUFFER_SIZE` - Write buffer size in bytes (default: 64MB)
+- `COZO_ROCKSDB_MAX_WRITE_BUFFER_NUMBER` - Max write buffers (default: 2)
+- `COZO_ROCKSDB_MIN_WRITE_BUFFER_NUMBER_TO_MERGE` - Min buffers before merge
+
+#### Compaction
+- `COZO_ROCKSDB_COMPACTION_STYLE` - level, universal, or fifo (default: level)
+- `COZO_ROCKSDB_LEVEL0_FILE_NUM_COMPACTION_TRIGGER` - L0 compaction trigger
+- `COZO_ROCKSDB_LEVEL0_SLOWDOWN_WRITES_TRIGGER` - L0 slowdown trigger
+- `COZO_ROCKSDB_LEVEL0_STOP_WRITES_TRIGGER` - L0 stop writes trigger
+- `COZO_ROCKSDB_MAX_BYTES_FOR_LEVEL_BASE` - Max bytes for L1
+- `COZO_ROCKSDB_MAX_BYTES_FOR_LEVEL_MULTIPLIER` - Level size multiplier
+- `COZO_ROCKSDB_TARGET_FILE_SIZE_BASE` - Target SST file size
+
+#### Compression
+- `COZO_ROCKSDB_COMPRESSION_TYPE` - none, snappy, zlib, lz4, lz4hc, zstd
+- `COZO_ROCKSDB_BOTTOMMOST_COMPRESSION_TYPE` - Compression for bottommost level
+
+#### Block-Based Table Options
+- `COZO_ROCKSDB_BLOCK_SIZE` - Block size in bytes (default: 4KB)
+- `COZO_ROCKSDB_BLOCK_CACHE_SIZE` - Block cache size in MB (default: 8MB)
+- `COZO_ROCKSDB_BLOOM_FILTER_BITS_PER_KEY` - Bloom filter bits (default: 10)
+- `COZO_ROCKSDB_BLOOM_FILTER_BLOCK_BASED` - Use block-based bloom filter
+
+#### Blob Storage (BlobDB)
+- `COZO_ROCKSDB_ENABLE_BLOB_FILES` - Enable blob files (default: false)
+- `COZO_ROCKSDB_MIN_BLOB_SIZE` - Min size to store in blob
+- `COZO_ROCKSDB_BLOB_FILE_SIZE` - Target blob file size
+- `COZO_ROCKSDB_BLOB_COMPRESSION_TYPE` - Blob compression type
+- `COZO_ROCKSDB_ENABLE_BLOB_GC` - Enable blob garbage collection
+- `COZO_ROCKSDB_BLOB_GC_AGE_CUTOFF` - Blob GC age cutoff (0.0-1.0)
+- `COZO_ROCKSDB_BLOB_GC_FORCE_THRESHOLD` - Force GC threshold (0.0-1.0)
+
+#### Write-Ahead Log (WAL)
+- `COZO_ROCKSDB_WAL_DIR` - WAL directory path
+- `COZO_ROCKSDB_WAL_TTL_SECONDS` - WAL time-to-live in seconds
+- `COZO_ROCKSDB_WAL_SIZE_LIMIT_MB` - WAL size limit in MB
+- `COZO_ROCKSDB_MAX_TOTAL_WAL_SIZE` - Max total WAL size in bytes
+
+#### I/O Options
+- `COZO_ROCKSDB_USE_DIRECT_READS` - Use O_DIRECT for reads (default: false)
+- `COZO_ROCKSDB_USE_DIRECT_IO_FOR_FLUSH_AND_COMPACTION` - Direct I/O for flush
+- `COZO_ROCKSDB_ALLOW_MMAP_READS` - Allow mmap for reads (default: false)
+- `COZO_ROCKSDB_ALLOW_MMAP_WRITES` - Allow mmap for writes (default: false)
+- `COZO_ROCKSDB_BYTES_PER_SYNC` - Bytes written before sync
+- `COZO_ROCKSDB_WRITABLE_FILE_MAX_BUFFER_SIZE` - Max writable file buffer
+
+#### Statistics
+- `COZO_ROCKSDB_ENABLE_STATISTICS` - Enable statistics (default: false)
+
+Example:
+```erlang
+%% Configure via environment before opening
+os:putenv("COZO_ROCKSDB_WRITE_BUFFER_SIZE", "134217728"),
+os:putenv("COZO_ROCKSDB_MAX_OPEN_FILES", "1000"),
+os:putenv("COZO_ROCKSDB_COMPRESSION_TYPE", "lz4"),
+{ok, Db} = cozodb:open(newrocksdb, "/path/to/db").
+```
 """.
 -spec open(Engine :: engine(), Path :: path(), Opts :: engine_opts()) ->
     {ok, db_handle()} | {error, Reason :: any()} | no_return().
@@ -553,8 +636,9 @@ open(Engine, Path, Opts) when
     is_atom(Engine), is_binary(Path), is_map(Opts)
 ->
     Engine == mem orelse Engine == sqlite orelse Engine == rocksdb orelse
+        Engine == newrocksdb orelse
         ?ERROR(badarg, [Engine, Path, Opts], #{
-            1 => "the value must be the atom `mem`, `rocksdb` or `sqlite`"
+            1 => "the value must be the atom `mem`, `rocksdb`, `sqlite` or `newrocksdb`"
         }),
 
     Path =/= <<>> orelse

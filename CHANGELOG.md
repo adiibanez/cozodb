@@ -1,5 +1,67 @@
 # CHANGELOG
 
+# 0.3.0
+
+## Breaking Changes
+* Database handles now use NIF `ResourceArc` instead of regular references
+  - Handles are automatically cleaned up when garbage collected
+  - `close/1` is now a graceful shutdown hint (database closes on GC)
+
+## New Features
+
+### New RocksDB Backend (`newrocksdb`)
+* Added alternative RocksDB backend using the official `rust-rocksdb` crate
+* Supports comprehensive configuration via 70+ `COZO_ROCKSDB_*` environment variables:
+  - General options (create_if_missing, paranoid_checks, max_open_files, etc.)
+  - Parallelism (increase_parallelism, max_background_jobs, max_subcompactions)
+  - Write buffer/memtable settings
+  - Compaction configuration (style, triggers, level settings)
+  - Compression options (lz4, zstd, snappy, etc.)
+  - Block-based table options (block_size, block_cache, bloom filters)
+  - Blob storage (BlobDB) configuration
+  - WAL settings
+  - Direct I/O options
+  - Statistics collection
+* **Note:** The two RocksDB backends (`rocksdb`/cozorocks and `newrocksdb`/rust-rocksdb) are **mutually exclusive** due to allocator conflicts. Build with one or the other using `COZODB_BACKEND` environment variable.
+
+### Memory Management APIs
+* `memory_stats/0` - Get jemalloc memory statistics (allocated, active, resident, mapped, retained)
+* `purge_jemalloc/0` - Force jemalloc to return unused memory to the OS
+* `set_jemalloc_decay/2` - Configure jemalloc decay times for memory return aggressiveness
+* `dump_heap_profile/1` - Dump jemalloc heap profile for analysis with `jeprof`
+
+### RocksDB Memory Control
+* `rocksdb_memory_stats/1` - Get per-database RocksDB memory statistics
+* `flush_memtables/1` - Force flush memtables to disk to release memory
+* `clear_block_cache/0` - Clear the shared RocksDB block cache (process-global)
+* `set_block_cache_capacity/1` - Dynamically adjust block cache size
+* `get_block_cache_stats/0` - Get block cache statistics
+
+### jemalloc Integration
+* Added jemalloc as optional memory allocator (enabled by default)
+* Configurable via environment variables at startup:
+  - `COZODB_JEMALLOC_DIRTY_DECAY_MS` - Dirty page decay time (default: 1000ms)
+  - `COZODB_JEMALLOC_MUZZY_DECAY_MS` - Muzzy page decay time (default: 1000ms)
+  - `COZODB_JEMALLOC_BACKGROUND_THREAD` - Enable background purging (default: true)
+  - `COZODB_JEMALLOC_NARENAS` - Number of arenas (optional)
+* Unified memory management between Rust NIF and RocksDB C++ via `cozo/rocksdb-jemalloc`
+
+## Build System
+* Added `COZODB_BACKEND` environment variable support in Makefile
+  - `make build` or `make build-rocksdb` - Build with cozorocks (default)
+  - `COZODB_BACKEND=newrocksdb make build` or `make build-newrocksdb` - Build with rust-rocksdb
+* Note: `rebar3_cargo` does not support passing Cargo features; use Makefile targets
+
+## Improvements
+* Improved Erlang serialization for better performance
+* Updated Cozo dependency to v0.8.2-leapsight (forked with newrocksdb support)
+* Added `newrocksdb` test groups with graceful skip when backend not compiled
+* Comprehensive README documentation for storage engines, backends, and configuration
+
+## Bug Fixes
+* Fixed memory issues with jemalloc configuration
+* Fixed jemalloc config warnings
+
 # 0.2.10
 * Upgraded Cozo dependency which now offers 3 new temporal functions
     1. expand_daily(h0, h1, tz, start, end) - Lines 3926-4007
