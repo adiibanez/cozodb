@@ -33,7 +33,31 @@ defmodule CozodbBenchmark do
       report_dir: "./benchmark_reports",
       # Track which allocator the NIF is using (for reporting purposes)
       # This is informational - actual allocator is determined at NIF compile time
-      allocator: :unknown
+      allocator: :unknown,
+
+      # === Erlang VM Configuration ===
+      # Number of dirty IO schedulers (from +SDio flag)
+      dirty_io_schedulers: nil,
+      # Number of regular schedulers
+      schedulers: nil,
+      # Number of dirty CPU schedulers
+      dirty_cpu_schedulers: nil,
+
+      # === jemalloc Configuration ===
+      # These are read from environment variables at startup
+      # Dirty page decay time in ms (default: 1000)
+      jemalloc_dirty_decay_ms: 1000,
+      # Muzzy page decay time in ms (default: 1000)
+      jemalloc_muzzy_decay_ms: 1000,
+      # Background thread enabled (default: true)
+      jemalloc_background_thread: true,
+      # Number of arenas (default: auto, typically 4*ncpus)
+      jemalloc_narenas: nil,
+
+      # === RocksDB Configuration ===
+      # Note: RocksDB options are configured via an 'options' file in the db_path directory
+      # See: https://github.com/facebook/rocksdb/wiki/RocksDB-Options-File
+      rocksdb_options_file: nil
     ]
   end
 
@@ -80,6 +104,10 @@ defmodule CozodbBenchmark do
   def run(opts \\ []) do
     config = struct(Config, opts)
 
+    # Detect VM and runtime configuration
+    config = detect_vm_config(config)
+    config = detect_jemalloc_config(config)
+
     Logger.info("Starting sustained load benchmark")
     Logger.info("Configuration: #{inspect(config)}")
 
@@ -97,8 +125,9 @@ defmodule CozodbBenchmark do
     {:ok, db} = open_db(config)
     Logger.info("Database opened: #{config.engine} at #{config.db_path}")
 
-    # Detect allocator from NIF stats
+    # Detect allocator from NIF stats and check for RocksDB options file
     config = detect_allocator(config)
+    config = detect_rocksdb_options(config)
     Logger.info("NIF allocator: #{config.allocator}")
 
     # Create tables and seed data
@@ -142,6 +171,76 @@ defmodule CozodbBenchmark do
         %{config | allocator: allocator}
       _ ->
         config
+    end
+  end
+
+  defp detect_vm_config(config) do
+    # Get scheduler info from :erlang.system_info
+    schedulers = :erlang.system_info(:schedulers)
+    dirty_cpu_schedulers = :erlang.system_info(:dirty_cpu_schedulers)
+    dirty_io_schedulers = :erlang.system_info(:dirty_io_schedulers)
+
+    %{config |
+      schedulers: schedulers,
+      dirty_cpu_schedulers: dirty_cpu_schedulers,
+      dirty_io_schedulers: dirty_io_schedulers
+    }
+  end
+
+  defp detect_jemalloc_config(config) do
+    # Read jemalloc configuration from environment variables
+    # These match the COZODB_JEMALLOC_* env vars used by the NIF
+    dirty_decay = parse_env_int("COZODB_JEMALLOC_DIRTY_DECAY_MS", 1000)
+    muzzy_decay = parse_env_int("COZODB_JEMALLOC_MUZZY_DECAY_MS", 1000)
+    bg_thread = parse_env_bool("COZODB_JEMALLOC_BACKGROUND_THREAD", true)
+    narenas = parse_env_int_optional("COZODB_JEMALLOC_NARENAS")
+
+    %{config |
+      jemalloc_dirty_decay_ms: dirty_decay,
+      jemalloc_muzzy_decay_ms: muzzy_decay,
+      jemalloc_background_thread: bg_thread,
+      jemalloc_narenas: narenas
+    }
+  end
+
+  defp detect_rocksdb_options(config) do
+    # Check if a RocksDB options file exists
+    options_path = Path.join(config.db_path, "options")
+    if File.exists?(options_path) do
+      %{config | rocksdb_options_file: options_path}
+    else
+      config
+    end
+  end
+
+  defp parse_env_int(var, default) do
+    case System.get_env(var) do
+      nil -> default
+      val ->
+        case Integer.parse(val) do
+          {n, _} -> n
+          :error -> default
+        end
+    end
+  end
+
+  defp parse_env_int_optional(var) do
+    case System.get_env(var) do
+      nil -> nil
+      val ->
+        case Integer.parse(val) do
+          {n, _} -> n
+          :error -> nil
+        end
+    end
+  end
+
+  defp parse_env_bool(var, default) do
+    case System.get_env(var) do
+      nil -> default
+      "false" -> false
+      "0" -> false
+      _ -> true
     end
   end
 
@@ -667,6 +766,7 @@ defmodule CozodbBenchmark do
 
     %{
       config: %{
+        # Benchmark config
         duration_seconds: config.duration_seconds,
         rampdown_seconds: config.rampdown_seconds,
         num_workers: config.num_workers,
@@ -675,7 +775,19 @@ defmodule CozodbBenchmark do
         value_size: config.value_size,
         workload: config.workload,
         engine: config.engine,
-        allocator: config.allocator
+        db_path: config.db_path,
+        # VM config
+        schedulers: config.schedulers,
+        dirty_cpu_schedulers: config.dirty_cpu_schedulers,
+        dirty_io_schedulers: config.dirty_io_schedulers,
+        # Allocator config
+        allocator: config.allocator,
+        jemalloc_dirty_decay_ms: config.jemalloc_dirty_decay_ms,
+        jemalloc_muzzy_decay_ms: config.jemalloc_muzzy_decay_ms,
+        jemalloc_background_thread: config.jemalloc_background_thread,
+        jemalloc_narenas: config.jemalloc_narenas,
+        # RocksDB config
+        rocksdb_options_file: config.rocksdb_options_file
       },
       summary: %{
         total_ops: metrics.total_ops,
@@ -833,7 +945,7 @@ defmodule CozodbBenchmark do
         <p style="color: #666; margin-bottom: 20px;">Generated: #{DateTime.utc_now() |> DateTime.to_string()}</p>
 
         <div class="card">
-          <h2>Configuration</h2>
+          <h2>Benchmark Configuration</h2>
           <div class="config-grid">
             <div class="config-item"><strong>Load Duration</strong> #{config.duration_seconds}s</div>
             <div class="config-item"><strong>Ramp-down</strong> #{config.rampdown_seconds}s</div>
@@ -843,7 +955,6 @@ defmodule CozodbBenchmark do
             <div class="config-item"><strong>Value Size</strong> #{config.value_size} bytes</div>
             <div class="config-item"><strong>Workload</strong> #{config.workload}</div>
             <div class="config-item"><strong>Engine</strong> #{config.engine}</div>
-            <div class="config-item"><strong>Allocator</strong> #{config.allocator}</div>
           </div>
           <div class="phase-legend">
             <span><div class="phase-dot phase-load"></div> Load Phase</span>
@@ -851,6 +962,59 @@ defmodule CozodbBenchmark do
             <span><div class="phase-dot phase-cooldown"></div> Cooldown</span>
           </div>
         </div>
+
+        <div class="card">
+          <h2>Erlang VM Configuration</h2>
+          <div class="config-grid">
+            <div class="config-item"><strong>Schedulers</strong> #{config.schedulers || "auto"}</div>
+            <div class="config-item"><strong>Dirty CPU Schedulers</strong> #{config.dirty_cpu_schedulers || "auto"}</div>
+            <div class="config-item"><strong>Dirty IO Schedulers</strong> #{config.dirty_io_schedulers || "auto"}</div>
+          </div>
+        </div>
+
+        <div class="card">
+          <h2>Memory Allocator Configuration</h2>
+          <div class="config-grid">
+            <div class="config-item"><strong>Allocator</strong> #{config.allocator}</div>
+            #{if config.allocator == :jemalloc do
+              """
+              <div class="config-item"><strong>Dirty Decay (ms)</strong> #{config.jemalloc_dirty_decay_ms}</div>
+              <div class="config-item"><strong>Muzzy Decay (ms)</strong> #{config.jemalloc_muzzy_decay_ms}</div>
+              <div class="config-item"><strong>Background Thread</strong> #{config.jemalloc_background_thread}</div>
+              <div class="config-item"><strong>Arenas</strong> #{config.jemalloc_narenas || "auto"}</div>
+              """
+            else
+              ""
+            end}
+          </div>
+          #{if config.allocator == :jemalloc do
+            """
+            <p style="color: #666; font-size: 11px; margin-top: 10px;">
+              Configure via: COZODB_JEMALLOC_DIRTY_DECAY_MS, COZODB_JEMALLOC_MUZZY_DECAY_MS, COZODB_JEMALLOC_BACKGROUND_THREAD, COZODB_JEMALLOC_NARENAS
+            </p>
+            """
+          else
+            ""
+          end}
+        </div>
+
+        #{if config.engine == :rocksdb do
+          """
+          <div class="card">
+            <h2>RocksDB Configuration</h2>
+            <div class="config-grid">
+              <div class="config-item"><strong>DB Path</strong> #{config.db_path}</div>
+              <div class="config-item"><strong>Options File</strong> #{config.rocksdb_options_file || "default"}</div>
+            </div>
+            <p style="color: #666; font-size: 11px; margin-top: 10px;">
+              RocksDB options can be customized by placing an 'options' file in the database directory.
+              See: <a href="https://github.com/facebook/rocksdb/wiki/RocksDB-Options-File" target="_blank">RocksDB Options File</a>
+            </p>
+          </div>
+          """
+        else
+          ""
+        end}
 
         <div class="card">
           <h2>Summary</h2>
