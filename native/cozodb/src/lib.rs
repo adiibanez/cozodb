@@ -687,8 +687,16 @@ fn open_res_with_options<'a>(
     options: String,
 ) -> NifResult<Term<'a>> {
     // Validate engine name and obtain DBInstance
+    // Supported engines:
+    //   - "mem": In-memory storage (no persistence)
+    //   - "sqlite": SQLite backend (good for small datasets, single-writer)
+    //   - "rocksdb": RocksDB via cozorocks (C++ FFI, current default)
+    //   - "newrocksdb": RocksDB via rust-rocksdb crate (comprehensive env var config)
+    //
+    // The "newrocksdb" engine requires the "new-rocksdb" feature to be enabled.
+    // It reads configuration from COZO_ROCKSDB_* environment variables.
     let result = match engine.as_str() {
-        "mem" | "sqlite" | "rocksdb" => {
+        "mem" | "sqlite" | "rocksdb" | "newrocksdb" => {
             DbInstance::new_with_str(engine.as_str(), path.as_str(), &options)
         }
         _ => return Err(rustler::Error::Term(Box::new(atoms::invalid_engine()))),

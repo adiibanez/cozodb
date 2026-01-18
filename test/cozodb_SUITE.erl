@@ -114,7 +114,29 @@ init_per_group(sqlite, Config) ->
 init_per_group(mem, Config) ->
     [{db_engine, mem} | Config];
 init_per_group(rocksdb, Config) ->
-    [{db_engine, rocksdb} | Config].
+    [{db_engine, rocksdb} | Config];
+init_per_group(newrocksdb, Config) ->
+    %% newrocksdb may not be compiled in (mutually exclusive with rocksdb/cozorocks)
+    case check_engine_available(newrocksdb) of
+        true ->
+            [{db_engine, newrocksdb} | Config];
+        false ->
+            {skip, "newrocksdb engine not compiled (use new-rocksdb-default feature)"}
+    end.
+
+%% Check if an engine is available by attempting to open a temp database
+check_engine_available(Engine) ->
+    TmpPath = "/tmp/cozodb_engine_check_" ++ atom_to_list(Engine),
+    _ = file:del_dir_r(TmpPath),
+    case cozodb:open(Engine, TmpPath) of
+        {ok, Db} ->
+            cozodb:close(Db),
+            _ = file:del_dir_r(TmpPath),
+            true;
+        {error, _} ->
+            _ = file:del_dir_r(TmpPath),
+            false
+    end.
 
 %% -----------------------------------------------------------------------------
 %% Function: end_per_group(GroupName, Config0) ->
@@ -175,6 +197,7 @@ groups() ->
         {mem, all_cases()},
         {mem, param_cases()},
         {rocksdb, all_cases()},
+        {newrocksdb, all_cases()},
         {sqlite, all_cases()}
     ].
 
@@ -224,9 +247,11 @@ all() ->
     [
         {group, mem, []},
         {group, rocksdb, []},
+        {group, newrocksdb, []},
         {group, sqlite, []},
         sqlite,
-        rocksdb
+        rocksdb,
+        newrocksdb
     ].
 
 %% -----------------------------------------------------------------------------
@@ -367,7 +392,7 @@ tutorial_rules(Config) ->
 
 tutorial_joins(Config) ->
     Engine = ?config(db_engine, Config),
-    Path = ?config(db_path, Config),
+    _Path = ?config(db_path, Config),
     ?QUERY_OK(
         "r1[] <- [[1, 'a'], [2, 'b']]"
         "r2[] <- [[2, 'B'], [3, 'C']]"
@@ -621,7 +646,7 @@ air_routes(Config) ->
     ?IQUERY_LOG(Db, "{:create route { fr: String, to: String => dist: Float }}"),
 
     {ok, #{rows := Rows}} = cozodb:relations(Db),
-    RelNames = [hd(Row) || Row <- Rows],
+    _RelNames = [hd(Row) || Row <- Rows],
 
     %% Test data sources directory
     DataDir = proplists:get_value(data_dir, Config, "test/cozodb_SUITE_data"),
@@ -905,7 +930,7 @@ air_routes(Config) ->
 %%
 %% -----------------------------------------------------------------------------
 sqlite(Config) ->
-    Engine = ?config(db_engine, Config),
+    _Engine = ?config(db_engine, Config),
     Path = ?config(db_path, Config),
     % create a new cozo database using sqlite
     {ok, Db} = cozodb:open(sqlite, filename:join([Path, "data.sqlite"])),
@@ -949,7 +974,7 @@ sqlite(Config) ->
 %% -----------------------------------------------------------------------------
 
 rocksdb(Config) ->
-    Engine = ?config(db_engine, Config),
+    _Engine = ?config(db_engine, Config),
     Path = ?config(db_path, Config),
     {ok, Db} = cozodb:open(rocksdb, Path),
     #{path := DbPath} = cozodb:info(Db),
@@ -984,12 +1009,105 @@ rocksdb(Config) ->
     cozodb:close(Db2).
 
 %% -----------------------------------------------------------------------------
+%% Test for the newrocksdb backend (rust-rocksdb crate)
+%% This backend supports comprehensive configuration via COZO_ROCKSDB_* env vars.
+%% NOTE: newrocksdb is mutually exclusive with rocksdb (cozorocks) due to
+%% allocator conflicts. Use new-rocksdb-default feature to enable it.
+%% -----------------------------------------------------------------------------
+
+newrocksdb(Config) ->
+    case check_engine_available(newrocksdb) of
+        false ->
+            {skip, "newrocksdb engine not compiled (use new-rocksdb-default feature)"};
+        true ->
+            newrocksdb_test(Config)
+    end.
+
+newrocksdb_test(Config) ->
+    _Engine = ?config(db_engine, Config),
+    Path = ?config(db_path, Config),
+
+    %% First open - use a fun to ensure handle goes out of scope
+    %% Note: close/1 is a no-op; the DB only closes when GC collects the ResourceArc
+    DbPath = newrocksdb_open_and_close(Path),
+
+    %% Force GC to release the database lock
+    erlang:garbage_collect(),
+    timer:sleep(100),
+    erlang:garbage_collect(),
+
+    %% Reopen the database to verify persistence
+    {ok, Db2} = cozodb:open(newrocksdb, DbPath),
+    #{path := DbPath} = cozodb:info(Db2),
+    true = filelib:is_dir(DbPath),
+    {ok, _} = cozodb:run(Db2, "?[] <- [[1, 2, 3]]"),
+    {ok, _} = cozodb:run(
+        Db2,
+        "?[a, b, c] <- [[1, 'a', 'A'],"
+        "[2, 'b', 'B'],"
+        "[3, 'c', 'C'],"
+        "[4, 'd', 'D']]"
+    ),
+    cozodb:close(Db2).
+
+%% Helper function to open and close newrocksdb, returning the path.
+%% The handle goes out of scope when this function returns, allowing GC to collect it.
+newrocksdb_open_and_close(Path) ->
+    {ok, Db} = cozodb:open(newrocksdb, Path),
+    #{path := DbPath} = cozodb:info(Db),
+    true = filelib:is_dir(DbPath),
+    {ok, _} = cozodb:run(Db, "?[] <- [[1, 2, 3]]"),
+    cozodb:close(Db),
+    DbPath.
+
+%% -----------------------------------------------------------------------------
 %%
 %% -----------------------------------------------------------------------------
 maintenance_commands(Config) ->
     Engine = ?config(db_engine, Config),
     Path = ?config(db_path, Config),
     EngineName = atom_to_list(Engine),
+
+    %% First part: open, setup relations, backup
+    %% Use a helper to ensure the handle goes out of scope (needed for newrocksdb GC)
+    {_DbPath, BackupPath} = maintenance_commands_setup(Engine, Path, EngineName),
+
+    %% Force GC to release database lock (required for newrocksdb)
+    erlang:garbage_collect(),
+    timer:sleep(100),
+    erlang:garbage_collect(),
+
+    %% Destroy db completely
+    case Engine of
+        sqlite ->
+            file:delete(Path);
+        _ ->
+            ok = file:del_dir_r(Path),
+            ok = file:make_dir(Path)
+    end,
+
+    {ok, Db1} = cozodb:open(Engine, Path),
+    ok = cozodb:restore(Db1, BackupPath),
+    ct:pal(info, ?LOW_IMPORTANCE, "~p", [{BackupPath}]),
+
+    % restore from json
+    % {ok, Backup} = file:read_file(BackupPath),
+    % BackupJson = binary_to_list(Backup),
+    % {ok, _} = cozodb:import_from_backup(Db, BackupJson),
+
+    % delete relation one by one
+    ok = cozodb:remove_relation(Db1, "stored"),
+    ok = cozodb:remove_relation(Db1, "stored2"),
+
+    % delete many relations
+    ok = cozodb:remove_relations(Db1, ["stored3", "stored4", "stored5"]),
+
+    ok = cozodb:close(Db1).
+
+%% Helper function for maintenance_commands test.
+%% Opens database, creates relations, does backup, and closes.
+%% The handle goes out of scope when this function returns, allowing GC to collect it.
+maintenance_commands_setup(Engine, Path, EngineName) ->
     {ok, Db} = cozodb:open(Engine, Path),
     #{path := DbPath} = cozodb:info(Db),
 
@@ -1020,39 +1138,11 @@ maintenance_commands(Config) ->
     ok = cozodb:import(Db, Relations),
     {ok, _} = cozodb:export(Db, [<<"stored">>]),
 
-    % backup/restore database
+    % backup database
     BackupPath = binary_to_list(DbPath) ++ "_" ++ EngineName ++ ".backup",
     ok = cozodb:backup(Db, BackupPath),
-
-    %% Destroy db completely
-    case Engine of
-        sqlite ->
-            file:delete(Path);
-        _ ->
-            ok = cozodb:close(Db),
-            ok = file:del_dir_r(Path),
-            ok = file:make_dir(Path)
-    end,
-
-    erlang:garbage_collect(),
-
-    {ok, Db1} = cozodb:open(Engine, Path),
-    ok = cozodb:restore(Db1, BackupPath),
-    ct:pal(info, ?LOW_IMPORTANCE, "~p", [{BackupPath}]),
-
-    % restore from json
-    % {ok, Backup} = file:read_file(BackupPath),
-    % BackupJson = binary_to_list(Backup),
-    % {ok, _} = cozodb:import_from_backup(Db, BackupJson),
-
-    % delete relation one by one
-    ok = cozodb:remove_relation(Db1, "stored"),
-    ok = cozodb:remove_relation(Db1, "stored2"),
-
-    % delete many relations
-    ok = cozodb:remove_relations(Db1, ["stored3", "stored4", "stored5"]),
-
-    ok = cozodb:close(Db1).
+    cozodb:close(Db),
+    {DbPath, BackupPath}.
 
 %% -----------------------------------------------------------------------------
 %%

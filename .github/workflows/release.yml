@@ -54,6 +54,8 @@ jobs:
             BRANCH_OR_TAG="${GITHUB_REF#refs/heads/}"
           fi
           echo "BRANCH_OR_TAG=$BRANCH_OR_TAG" >> $GITHUB_ENV
+      - name: Install build dependencies
+        run: sudo apt-get update && sudo apt-get install -y build-essential clang libclang-dev pkg-config
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:

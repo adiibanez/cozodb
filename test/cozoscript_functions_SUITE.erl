@@ -80,7 +80,29 @@ init_per_group(sqlite, Config) ->
 init_per_group(mem, Config) ->
     [{db_engine, mem} | Config];
 init_per_group(rocksdb, Config) ->
-    [{db_engine, rocksdb} | Config].
+    [{db_engine, rocksdb} | Config];
+init_per_group(newrocksdb, Config) ->
+    %% newrocksdb may not be compiled in (mutually exclusive with rocksdb/cozorocks)
+    case check_engine_available(newrocksdb) of
+        true ->
+            [{db_engine, newrocksdb} | Config];
+        false ->
+            {skip, "newrocksdb engine not compiled (use new-rocksdb-default feature)"}
+    end.
+
+%% Check if an engine is available by attempting to open a temp database
+check_engine_available(Engine) ->
+    TmpPath = "/tmp/cozodb_engine_check_" ++ atom_to_list(Engine),
+    _ = file:del_dir_r(TmpPath),
+    case cozodb:open(Engine, TmpPath) of
+        {ok, Db} ->
+            cozodb:close(Db),
+            _ = file:del_dir_r(TmpPath),
+            true;
+        {error, _} ->
+            _ = file:del_dir_r(TmpPath),
+            false
+    end.
 
 %% -----------------------------------------------------------------------------
 %% Function: end_per_group(GroupName, Config0) ->
@@ -140,6 +162,7 @@ groups() ->
     [
         {mem, all_cases()},
         {rocksdb, all_cases()},
+        {newrocksdb, all_cases()},
         {sqlite, all_cases()}
     ].
 
@@ -160,6 +183,7 @@ all() ->
     [
         {group, mem, []},
         {group, rocksdb, []},
+        {group, newrocksdb, []},
         {group, sqlite, []}
     ].
 

@@ -13,7 +13,7 @@ crate-type = ["cdylib"]
 [dependencies]
 rustler = {version = "=0.37.0", features = ["nif_version_2_17"]}
 # Using local path temporarily to test new memory stats functionality
-cozo = {git = "https://github.com/aramallo/cozo.git", tag = "v0.8.1-leapsight" }
+cozo = {git = "https://github.com/aramallo/cozo.git", tag = "v0.8.2-leapsight" }
 uuid = "1.3.3"
 threadpool = "1.8.1"
 once_cell = "1.21.3"
@@ -47,6 +47,31 @@ default = [
     "jemalloc"  # jemalloc with 0ms decay: best throughput + low memory retention
 ]
 
+# IMPORTANT: storage-rocksdb (cozorocks) and storage-new-rocksdb (rust-rocksdb) are
+# MUTUALLY EXCLUSIVE. Both link to RocksDB with different allocator configurations,
+# causing "pointer being freed was not allocated" crashes when used together.
+#
+# Use ONE of these configurations:
+#
+# 1. Default (cozorocks): --features "default"
+#    - Uses cozorocks C++ FFI bridge
+#    - Configured via RocksDB OPTIONS file
+#
+# 2. New RocksDB (rust-rocksdb): --no-default-features --features "new-rocksdb-default"
+#    - Uses official rust-rocksdb crate
+#    - Configured via COZO_ROCKSDB_* environment variables
+
+# New RocksDB backend with all standard features (REPLACES default, not additive)
+new-rocksdb-default = [
+    "cozo/storage-sqlite",
+    "cozo/storage-new-rocksdb",
+    "cozo/graph-algo",
+    "jemalloc"
+]
+
+# Just the new-rocksdb feature alone (for combining with other features manually)
+new-rocksdb = ["cozo/storage-new-rocksdb"]
+
 # Use Erlang's allocator (EnifAllocator from rustler 0.37+) for Rust allocations.
 # This allows:
 # 1. Rust NIF allocations are tracked by the BEAM
@@ -73,5 +98,5 @@ jemalloc = ["tikv-jemallocator", "tikv-jemalloc-ctl", "tikv-jemalloc-sys", "cozo
 nif_alloc_rocksdb_jemalloc = ["nif_alloc", "tikv-jemalloc-ctl", "tikv-jemalloc-sys", "cozo/rocksdb-jemalloc"]
 
 [target.'cfg(target_os = "linux")'.dependencies]
-cozo = { git = "https://github.com/aramallo/cozo.git", tag = "v0.8.1-leapsight", features = ["io-uring"] }
+cozo = { git = "https://github.com/aramallo/cozo.git", tag = "v0.8.2-leapsight", features = ["io-uring"] }
 
