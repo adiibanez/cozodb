@@ -107,9 +107,77 @@ rustler::init!("cozodb", load = on_load);
 
 /// Define NIF Resources using rustler::resource! macro
 fn on_load(env: Env, _: Term) -> bool {
-    // rustler::resource!(DbHandle, env);
     rustler::resource!(DbHandleResource, env);
+
+    // Configure jemalloc for more aggressive memory return to OS
+    #[cfg(all(feature = "jemalloc", not(target_env = "msvc")))]
+    {
+        configure_jemalloc_decay();
+    }
+
     true
+}
+
+/// Configure jemalloc's decay times to return memory to the OS more aggressively.
+///
+/// By default, jemalloc holds onto freed memory for 10 seconds before returning it.
+/// This can cause high memory usage under bursty workloads. Setting decay times to
+/// lower values (or 0) makes jemalloc return memory more quickly.
+///
+/// Environment variables can override defaults:
+/// - COZODB_JEMALLOC_DIRTY_DECAY_MS: dirty page decay time (default: 1000ms)
+/// - COZODB_JEMALLOC_MUZZY_DECAY_MS: muzzy page decay time (default: 1000ms)
+///
+/// Set to 0 for immediate return (may impact performance under high allocation rates)
+/// Set to -1 to disable decay (jemalloc default behavior, holds memory longer)
+#[cfg(all(feature = "jemalloc", not(target_env = "msvc")))]
+fn configure_jemalloc_decay() {
+    use std::env;
+
+    // Default to 1000ms (1 second) - much more aggressive than jemalloc's 10s default
+    // but not so aggressive as to hurt performance
+    let dirty_decay_ms: i64 = env::var("COZODB_JEMALLOC_DIRTY_DECAY_MS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1000);
+
+    let muzzy_decay_ms: i64 = env::var("COZODB_JEMALLOC_MUZZY_DECAY_MS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1000);
+
+    // Apply decay settings to all arenas
+    if let Err(e) = set_jemalloc_decay(dirty_decay_ms, muzzy_decay_ms) {
+        eprintln!("Warning: Failed to configure jemalloc decay: {}", e);
+    }
+}
+
+/// Set jemalloc decay times for all arenas
+#[cfg(all(feature = "jemalloc", not(target_env = "msvc")))]
+fn set_jemalloc_decay(dirty_decay_ms: i64, muzzy_decay_ms: i64) -> Result<(), String> {
+    use tikv_jemalloc_ctl::raw;
+
+    // Set dirty decay time (controls how long dirty pages are held before purging)
+    // Dirty pages contain data that was recently freed
+    unsafe {
+        let key = b"arenas.dirty_decay_ms\0";
+        let result = raw::write(key, dirty_decay_ms as isize);
+        if result.is_err() {
+            return Err(format!("Failed to set dirty_decay_ms: {:?}", result));
+        }
+    }
+
+    // Set muzzy decay time (controls how long muzzy pages are held)
+    // Muzzy pages are dirty pages that have been purged but not yet returned to OS
+    unsafe {
+        let key = b"arenas.muzzy_decay_ms\0";
+        let result = raw::write(key, muzzy_decay_ms as isize);
+        if result.is_err() {
+            return Err(format!("Failed to set muzzy_decay_ms: {:?}", result));
+        }
+    }
+
+    Ok(())
 }
 
 // =============================================================================
@@ -1062,6 +1130,69 @@ fn purge_jemalloc<'a>(env: Env<'a>) -> NifResult<Term<'a>> {
             let error_msg = format!("mallctl purge failed with code {}", result);
             Ok((atoms::error(), error_msg.encode(env)).encode(env))
         }
+    }
+
+    #[cfg(not(all(feature = "jemalloc", not(target_env = "msvc"))))]
+    {
+        Ok((atoms::error(), "not_jemalloc".encode(env)).encode(env))
+    }
+}
+
+/// Configure jemalloc decay times at runtime.
+///
+/// Arguments:
+/// - dirty_decay_ms: Time in milliseconds before dirty pages are purged (0 = immediate, -1 = disable)
+/// - muzzy_decay_ms: Time in milliseconds before muzzy pages are purged (0 = immediate, -1 = disable)
+///
+/// Returns: :ok on success, {:error, reason} on failure.
+///
+/// Lower values = more aggressive memory return to OS (may impact performance)
+/// Higher values = better performance but higher memory usage
+/// Default jemalloc is 10000ms (10 seconds), we default to 1000ms (1 second)
+#[rustler::nif(name = "set_jemalloc_decay_nif")]
+fn set_jemalloc_decay_nif<'a>(
+    env: Env<'a>,
+    dirty_decay_ms: i64,
+    muzzy_decay_ms: i64,
+) -> NifResult<Term<'a>> {
+    #[cfg(all(feature = "jemalloc", not(target_env = "msvc")))]
+    {
+        match set_jemalloc_decay(dirty_decay_ms, muzzy_decay_ms) {
+            Ok(()) => Ok(atoms::ok().encode(env)),
+            Err(e) => Ok((atoms::error(), e.encode(env)).encode(env)),
+        }
+    }
+
+    #[cfg(not(all(feature = "jemalloc", not(target_env = "msvc"))))]
+    {
+        Ok((atoms::error(), "not_jemalloc".encode(env)).encode(env))
+    }
+}
+
+/// Get current jemalloc decay settings.
+///
+/// Returns: {:ok, #{dirty_decay_ms => integer(), muzzy_decay_ms => integer()}}
+#[rustler::nif(name = "get_jemalloc_decay_nif")]
+fn get_jemalloc_decay_nif<'a>(env: Env<'a>) -> NifResult<Term<'a>> {
+    #[cfg(all(feature = "jemalloc", not(target_env = "msvc")))]
+    {
+        use tikv_jemalloc_ctl::raw;
+
+        let dirty_decay_ms: isize = unsafe {
+            let key = b"arenas.dirty_decay_ms\0";
+            raw::read(key).unwrap_or(-999)
+        };
+
+        let muzzy_decay_ms: isize = unsafe {
+            let key = b"arenas.muzzy_decay_ms\0";
+            raw::read(key).unwrap_or(-999)
+        };
+
+        let mut map = rustler::types::map::map_new(env);
+        map = map.map_put("dirty_decay_ms".encode(env), (dirty_decay_ms as i64).encode(env)).unwrap();
+        map = map.map_put("muzzy_decay_ms".encode(env), (muzzy_decay_ms as i64).encode(env)).unwrap();
+
+        Ok((atoms::ok(), map).encode(env))
     }
 
     #[cfg(not(all(feature = "jemalloc", not(target_env = "msvc"))))]

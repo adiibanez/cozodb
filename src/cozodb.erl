@@ -144,6 +144,73 @@ following script is equivalent to the previous example.
 ```
 For more details, see the <a href="https://docs.cozodb.org/en/latest/vector.html#full-text-search-fts" target="_">FTS documentation</a>.
 
+## Memory Management
+
+This NIF uses [jemalloc](https://jemalloc.net/) as the global allocator for both Rust
+and RocksDB (C++) allocations. This provides unified memory management and statistics
+across the entire NIF.
+
+### Memory Functions
+
+- `memory_stats/0` - Get jemalloc memory statistics (allocated, resident, mapped, retained)
+- `rocksdb_memory_stats/1` - Get RocksDB-specific memory usage (memtables, block cache)
+- `purge_jemalloc/0` - Force immediate return of unused memory to the OS
+- `set_jemalloc_decay/2` - Configure how aggressively memory is returned to the OS
+- `get_jemalloc_decay/0` - Query current decay settings
+
+### Understanding jemalloc Memory Retention
+
+jemalloc retains freed memory in "dirty pages" and "muzzy pages" for potential reuse,
+which improves performance but can make memory appear "leaked" when it's actually
+just cached. The decay times control how long this memory is held:
+
+- **Dirty pages**: Recently freed memory that still contains data
+- **Muzzy pages**: Dirty pages that have been purged but VM mapping is retained
+
+By default, jemalloc holds memory for 10 seconds before returning it to the OS.
+This NIF configures a more aggressive default of 1 second (1000ms).
+
+### Tuning Memory Return
+
+You can control memory return behavior at runtime:
+
+```erlang
+%% Check current decay settings
+{ok, Settings} = cozodb:get_jemalloc_decay().
+%% #{<<"dirty_decay_ms">> => 1000, <<"muzzy_decay_ms">> => 1000}
+
+%% Most aggressive - immediate return to OS
+%% Lower memory usage but may reduce throughput under high allocation rates
+ok = cozodb:set_jemalloc_decay(0, 0).
+
+%% Balanced (our default) - 1 second decay
+%% Good balance between memory usage and performance
+ok = cozodb:set_jemalloc_decay(1000, 1000).
+
+%% Less aggressive - original jemalloc default (10 seconds)
+%% Best performance but higher memory retention
+ok = cozodb:set_jemalloc_decay(10000, 10000).
+
+%% Disable decay entirely - maximum memory retention
+ok = cozodb:set_jemalloc_decay(-1, -1).
+```
+
+### Environment Variables
+
+Default decay times can be overridden at startup via environment variables:
+
+- `COZODB_JEMALLOC_DIRTY_DECAY_MS` - Dirty page decay time (default: 1000)
+- `COZODB_JEMALLOC_MUZZY_DECAY_MS` - Muzzy page decay time (default: 1000)
+
+Example: `COZODB_JEMALLOC_DIRTY_DECAY_MS=0 COZODB_JEMALLOC_MUZZY_DECAY_MS=0 rebar3 shell`
+
+### Recommended Tuning Strategy
+
+1. **High-throughput workloads**: Use higher decay times (5000-10000ms) for better performance
+2. **Memory-constrained environments**: Use lower decay times (0-1000ms) or call `purge_jemalloc/0` periodically
+3. **Bursty workloads**: The default 1000ms works well; memory is returned within a second of load reduction
+4. **Testing/debugging memory**: Set to 0 and call `purge_jemalloc/0` to see actual memory usage
+
 ## System Operations
 * Query Management: Monitor running queries with running/1 and terminate problematic queries using kill/2.
 """.
@@ -378,6 +445,8 @@ For more details, see the <a href="https://docs.cozodb.org/en/latest/vector.html
 -export([get_block_cache_stats/0]).
 %% jemalloc control
 -export([purge_jemalloc/0]).
+-export([set_jemalloc_decay/2]).
+-export([get_jemalloc_decay/0]).
 
 -on_load(init/0).
 
@@ -1211,6 +1280,56 @@ Returns:
 purge_jemalloc() ->
     purge_jemalloc_nif().
 
+-doc """
+Configure jemalloc decay times to control how aggressively memory is returned to the OS.
+
+Arguments:
+- `DirtyDecayMs` - Time in milliseconds before dirty pages are purged
+  - 0 = immediate return (most aggressive, may impact performance)
+  - -1 = disable decay (jemalloc default behavior, holds memory longer)
+  - 1000 = our default (1 second, 10x more aggressive than jemalloc's 10s default)
+- `MuzzyDecayMs` - Time in milliseconds before muzzy pages are purged (same options)
+
+Dirty pages contain recently freed data. Muzzy pages are dirty pages that have been
+purged but the virtual memory mapping is retained for potential reuse.
+
+Example:
+```erlang
+%% Most aggressive - immediate return to OS
+cozodb:set_jemalloc_decay(0, 0).
+
+%% Default (set at NIF load time)
+cozodb:set_jemalloc_decay(1000, 1000).
+
+%% jemalloc default - least aggressive
+cozodb:set_jemalloc_decay(10000, 10000).
+```
+
+Returns:
+- `ok` - Settings applied successfully
+- `{error, not_jemalloc}` - Not using jemalloc allocator
+- `{error, Reason}` - Other error
+""".
+-spec set_jemalloc_decay(DirtyDecayMs :: integer(), MuzzyDecayMs :: integer()) ->
+    ok | {error, term()}.
+
+set_jemalloc_decay(DirtyDecayMs, MuzzyDecayMs) when
+    is_integer(DirtyDecayMs), is_integer(MuzzyDecayMs)
+->
+    set_jemalloc_decay_nif(DirtyDecayMs, MuzzyDecayMs).
+
+-doc """
+Get current jemalloc decay settings.
+
+Returns:
+- `{ok, #{dirty_decay_ms => integer(), muzzy_decay_ms => integer()}}` - Current settings
+- `{error, not_jemalloc}` - Not using jemalloc allocator
+""".
+-spec get_jemalloc_decay() -> {ok, map()} | {error, term()}.
+
+get_jemalloc_decay() ->
+    get_jemalloc_decay_nif().
+
 
 %% =============================================================================
 %% API: Utils
@@ -1318,6 +1437,19 @@ get_block_cache_stats_nif() ->
 -spec purge_jemalloc_nif() -> {ok, non_neg_integer()} | {error, term()}.
 
 purge_jemalloc_nif() ->
+    ?NIF_NOT_LOADED.
+
+%% @private
+-spec set_jemalloc_decay_nif(DirtyDecayMs :: integer(), MuzzyDecayMs :: integer()) ->
+    ok | {error, term()}.
+
+set_jemalloc_decay_nif(_DirtyDecayMs, _MuzzyDecayMs) ->
+    ?NIF_NOT_LOADED.
+
+%% @private
+-spec get_jemalloc_decay_nif() -> {ok, map()} | {error, term()}.
+
+get_jemalloc_decay_nif() ->
     ?NIF_NOT_LOADED.
 
 %% -----------------------------------------------------------------------------
