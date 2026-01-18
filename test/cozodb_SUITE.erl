@@ -1034,6 +1034,8 @@ maintenance_commands(Config) ->
             ok = file:make_dir(Path)
     end,
 
+    erlang:garbage_collect(),
+
     {ok, Db1} = cozodb:open(Engine, Path),
     ok = cozodb:restore(Db1, BackupPath),
     ct:pal(info, ?LOW_IMPORTANCE, "~p", [{BackupPath}]),
