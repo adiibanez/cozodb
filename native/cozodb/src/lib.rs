@@ -173,6 +173,8 @@ fn configure_jemalloc() {
         .unwrap_or(true);
 
     if enable_bg_thread {
+        // background_thread requires jemalloc compiled with --enable-background-thread
+        // It's optional - if not available, decay still works but synchronously
         unsafe {
             let key = CString::new("background_thread").unwrap();
             let value: bool = true;
@@ -183,7 +185,8 @@ fn configure_jemalloc() {
                 &value as *const bool as *mut std::ffi::c_void,
                 std::mem::size_of::<bool>(),
             );
-            if result != 0 {
+            // Error 2 (ENOENT) means not compiled in - this is fine, just skip
+            if result != 0 && result != 2 {
                 eprintln!("Warning: Failed to enable jemalloc background_thread: error {}", result);
             }
         }
@@ -234,56 +237,43 @@ fn configure_jemalloc() {
 
 /// Set jemalloc decay times for all arenas
 /// Only available when jemalloc is the global allocator
+///
+/// According to jemalloc docs, `arenas.dirty_decay_ms` sets the decay time
+/// for ALL arenas (not just new ones). The value is ssize_t.
 #[cfg(all(feature = "jemalloc", not(feature = "nif_alloc"), not(target_env = "msvc")))]
 fn set_jemalloc_decay(dirty_decay_ms: i64, muzzy_decay_ms: i64) -> Result<(), String> {
-    use tikv_jemalloc_ctl::raw;
     use std::ffi::CString;
 
-    // First, set the default for new arenas
+    // Set dirty decay time for ALL arenas
+    // jemalloc uses ssize_t which maps to isize in Rust
+    let dirty_val: isize = dirty_decay_ms as isize;
     unsafe {
-        let key = b"arenas.dirty_decay_ms\0";
-        let result = raw::write(key, dirty_decay_ms as isize);
-        if result.is_err() {
-            return Err(format!("Failed to set default dirty_decay_ms: {:?}", result));
-        }
-    }
-
-    unsafe {
-        let key = b"arenas.muzzy_decay_ms\0";
-        let result = raw::write(key, muzzy_decay_ms as isize);
-        if result.is_err() {
-            return Err(format!("Failed to set default muzzy_decay_ms: {:?}", result));
-        }
-    }
-
-    // Now apply to ALL existing arenas using arena.4096.* (MALLCTL_ARENAS_ALL = 4096)
-    // This is critical because jemalloc initializes before on_load runs, so arenas
-    // already exist with jemalloc's default 10s decay time.
-    unsafe {
-        let key = CString::new("arena.4096.dirty_decay_ms").unwrap();
+        let key = CString::new("arenas.dirty_decay_ms").unwrap();
         let result = tikv_jemalloc_sys::mallctl(
             key.as_ptr(),
             std::ptr::null_mut(),
             std::ptr::null_mut(),
-            &dirty_decay_ms as *const i64 as *mut std::ffi::c_void,
-            std::mem::size_of::<i64>(),
+            &dirty_val as *const isize as *mut std::ffi::c_void,
+            std::mem::size_of::<isize>(),
         );
         if result != 0 {
-            return Err(format!("Failed to set dirty_decay_ms for all arenas: error {}", result));
+            return Err(format!("Failed to set dirty_decay_ms: error {}", result));
         }
     }
 
+    // Set muzzy decay time for ALL arenas
+    let muzzy_val: isize = muzzy_decay_ms as isize;
     unsafe {
-        let key = CString::new("arena.4096.muzzy_decay_ms").unwrap();
+        let key = CString::new("arenas.muzzy_decay_ms").unwrap();
         let result = tikv_jemalloc_sys::mallctl(
             key.as_ptr(),
             std::ptr::null_mut(),
             std::ptr::null_mut(),
-            &muzzy_decay_ms as *const i64 as *mut std::ffi::c_void,
-            std::mem::size_of::<i64>(),
+            &muzzy_val as *const isize as *mut std::ffi::c_void,
+            std::mem::size_of::<isize>(),
         );
         if result != 0 {
-            return Err(format!("Failed to set muzzy_decay_ms for all arenas: error {}", result));
+            return Err(format!("Failed to set muzzy_decay_ms: error {}", result));
         }
     }
 
