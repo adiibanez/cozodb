@@ -134,45 +134,97 @@ rustler::init!("cozodb", load = on_load);
 fn on_load(env: Env, _: Term) -> bool {
     rustler::resource!(DbHandleResource, env);
 
-    // Configure jemalloc for more aggressive memory return to OS
+    // Configure jemalloc: background threads, decay times, and optional arena limits
     // Only when jemalloc is the global allocator (not when using nif_alloc)
     #[cfg(all(feature = "jemalloc", not(feature = "nif_alloc"), not(target_env = "msvc")))]
     {
-        configure_jemalloc_decay();
+        configure_jemalloc();
     }
 
     true
 }
 
-/// Configure jemalloc's decay times to return memory to the OS more aggressively.
+/// Configure jemalloc for optimal memory behavior.
 ///
-/// By default, jemalloc holds onto freed memory for 10 seconds before returning it.
-/// This can cause high memory usage under bursty workloads. Setting decay times to
-/// lower values (or 0) makes jemalloc return memory more quickly.
+/// This configures:
+/// 1. Background thread for async purging (reduces latency impact)
+/// 2. Decay times for returning memory to the OS
+/// 3. Optional arena count limiting
 ///
-/// Environment variables can override defaults:
+/// Environment variables:
+/// - COZODB_JEMALLOC_BACKGROUND_THREAD: "true" (default) or "false"
+/// - COZODB_JEMALLOC_NARENAS: number of arenas (optional, reduces RSS with many threads)
 /// - COZODB_JEMALLOC_DIRTY_DECAY_MS: dirty page decay time (default: 1000ms)
 /// - COZODB_JEMALLOC_MUZZY_DECAY_MS: muzzy page decay time (default: 1000ms)
 ///
-/// Set to 0 for immediate return (may impact performance under high allocation rates)
-/// Set to -1 to disable decay (jemalloc default behavior, holds memory longer)
+/// Decay values:
+/// - 0 = immediate return (aggressive, may impact latency)
+/// - 1000-5000 = balanced (good RSS with minimal latency impact)
+/// - -1 = disable decay (jemalloc default 10s, holds memory longer)
 #[cfg(all(feature = "jemalloc", not(feature = "nif_alloc"), not(target_env = "msvc")))]
-fn configure_jemalloc_decay() {
+fn configure_jemalloc() {
     use std::env;
+    use std::ffi::CString;
 
-    // Default to 0ms (immediate return) - most aggressive memory return
-    // This may impact performance under very high allocation rates but ensures
-    // memory is returned to the OS as soon as it's freed.
-    // Use environment variables to tune if performance is impacted.
+    // Enable background thread for async purging (reduces latency impact of decay)
+    // COZODB_JEMALLOC_BACKGROUND_THREAD: "true" (default) or "false"
+    let enable_bg_thread = env::var("COZODB_JEMALLOC_BACKGROUND_THREAD")
+        .map(|v| v != "false" && v != "0")
+        .unwrap_or(true);
+
+    if enable_bg_thread {
+        unsafe {
+            let key = CString::new("background_thread").unwrap();
+            let value: bool = true;
+            let result = tikv_jemalloc_sys::mallctl(
+                key.as_ptr(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &value as *const bool as *mut std::ffi::c_void,
+                std::mem::size_of::<bool>(),
+            );
+            if result != 0 {
+                eprintln!("Warning: Failed to enable jemalloc background_thread: error {}", result);
+            }
+        }
+    }
+
+    // Optionally limit the number of arenas to reduce memory overhead
+    // COZODB_JEMALLOC_NARENAS: number of arenas (default: jemalloc auto, typically 4*ncpus)
+    // Lower values (4-8) can reduce RSS spikes with many threads
+    if let Ok(narenas_str) = env::var("COZODB_JEMALLOC_NARENAS") {
+        if let Ok(narenas) = narenas_str.parse::<u32>() {
+            unsafe {
+                let key = CString::new("narenas").unwrap();
+                let result = tikv_jemalloc_sys::mallctl(
+                    key.as_ptr(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    &narenas as *const u32 as *mut std::ffi::c_void,
+                    std::mem::size_of::<u32>(),
+                );
+                if result != 0 {
+                    eprintln!("Warning: Failed to set jemalloc narenas to {}: error {}", narenas, result);
+                }
+            }
+        }
+    }
+
+    // Balanced defaults: 1000ms decay with background thread gives good RSS
+    // while minimizing latency impact. Use 0 for aggressive memory return,
+    // or higher values (5000-10000) if you see performance issues.
+    //
+    // COZODB_JEMALLOC_DIRTY_DECAY_MS: dirty page decay time (default: 1000ms)
+    // COZODB_JEMALLOC_MUZZY_DECAY_MS: muzzy page decay time (default: 1000ms)
     let dirty_decay_ms: i64 = env::var("COZODB_JEMALLOC_DIRTY_DECAY_MS")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or(0);
+        .unwrap_or(1000);
 
     let muzzy_decay_ms: i64 = env::var("COZODB_JEMALLOC_MUZZY_DECAY_MS")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or(0);
+        .unwrap_or(1000);
 
     // Apply decay settings to all arenas
     if let Err(e) = set_jemalloc_decay(dirty_decay_ms, muzzy_decay_ms) {
@@ -185,24 +237,53 @@ fn configure_jemalloc_decay() {
 #[cfg(all(feature = "jemalloc", not(feature = "nif_alloc"), not(target_env = "msvc")))]
 fn set_jemalloc_decay(dirty_decay_ms: i64, muzzy_decay_ms: i64) -> Result<(), String> {
     use tikv_jemalloc_ctl::raw;
+    use std::ffi::CString;
 
-    // Set dirty decay time (controls how long dirty pages are held before purging)
-    // Dirty pages contain data that was recently freed
+    // First, set the default for new arenas
     unsafe {
         let key = b"arenas.dirty_decay_ms\0";
         let result = raw::write(key, dirty_decay_ms as isize);
         if result.is_err() {
-            return Err(format!("Failed to set dirty_decay_ms: {:?}", result));
+            return Err(format!("Failed to set default dirty_decay_ms: {:?}", result));
         }
     }
 
-    // Set muzzy decay time (controls how long muzzy pages are held)
-    // Muzzy pages are dirty pages that have been purged but not yet returned to OS
     unsafe {
         let key = b"arenas.muzzy_decay_ms\0";
         let result = raw::write(key, muzzy_decay_ms as isize);
         if result.is_err() {
-            return Err(format!("Failed to set muzzy_decay_ms: {:?}", result));
+            return Err(format!("Failed to set default muzzy_decay_ms: {:?}", result));
+        }
+    }
+
+    // Now apply to ALL existing arenas using arena.4096.* (MALLCTL_ARENAS_ALL = 4096)
+    // This is critical because jemalloc initializes before on_load runs, so arenas
+    // already exist with jemalloc's default 10s decay time.
+    unsafe {
+        let key = CString::new("arena.4096.dirty_decay_ms").unwrap();
+        let result = tikv_jemalloc_sys::mallctl(
+            key.as_ptr(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &dirty_decay_ms as *const i64 as *mut std::ffi::c_void,
+            std::mem::size_of::<i64>(),
+        );
+        if result != 0 {
+            return Err(format!("Failed to set dirty_decay_ms for all arenas: error {}", result));
+        }
+    }
+
+    unsafe {
+        let key = CString::new("arena.4096.muzzy_decay_ms").unwrap();
+        let result = tikv_jemalloc_sys::mallctl(
+            key.as_ptr(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &muzzy_decay_ms as *const i64 as *mut std::ffi::c_void,
+            std::mem::size_of::<i64>(),
+        );
+        if result != 0 {
+            return Err(format!("Failed to set muzzy_decay_ms for all arenas: error {}", result));
         }
     }
 
@@ -1188,9 +1269,9 @@ fn purge_jemalloc<'a>(env: Env<'a>) -> NifResult<Term<'a>> {
 ///
 /// Returns: :ok on success, {:error, reason} on failure.
 ///
-/// Lower values = more aggressive memory return to OS (may impact performance)
-/// Higher values = better performance but higher memory usage
-/// Default jemalloc is 10000ms (10 seconds), we default to 1000ms (1 second)
+/// Lower values = more aggressive memory return to OS (may impact latency)
+/// Higher values = better latency but higher memory usage
+/// Default jemalloc is 10000ms (10 seconds), we default to 1000ms (balanced)
 ///
 /// Note: Only available when jemalloc is the global allocator (not when using nif_alloc).
 #[rustler::nif(name = "set_jemalloc_decay_nif")]

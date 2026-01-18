@@ -201,19 +201,30 @@ ok = cozodb:set_jemalloc_decay(-1, -1).
 
 ### Environment Variables
 
-Default decay times can be overridden at startup via environment variables:
+jemalloc behavior can be tuned at startup via environment variables:
 
-- `COZODB_JEMALLOC_DIRTY_DECAY_MS` - Dirty page decay time (default: 0)
-- `COZODB_JEMALLOC_MUZZY_DECAY_MS` - Muzzy page decay time (default: 0)
+- `COZODB_JEMALLOC_BACKGROUND_THREAD` - Enable async purging (default: true)
+- `COZODB_JEMALLOC_NARENAS` - Limit arena count (optional, e.g., 4 or 8 for many threads)
+- `COZODB_JEMALLOC_DIRTY_DECAY_MS` - Dirty page decay time (default: 1000ms)
+- `COZODB_JEMALLOC_MUZZY_DECAY_MS` - Muzzy page decay time (default: 1000ms)
 
-Example: `COZODB_JEMALLOC_DIRTY_DECAY_MS=1000 COZODB_JEMALLOC_MUZZY_DECAY_MS=1000 rebar3 shell`
+Example for aggressive memory return:
+```
+COZODB_JEMALLOC_DIRTY_DECAY_MS=0 COZODB_JEMALLOC_MUZZY_DECAY_MS=0 rebar3 shell
+```
+
+Example with limited arenas (useful with many dirty schedulers):
+```
+COZODB_JEMALLOC_NARENAS=8 rebar3 shell
+```
 
 ### Recommended Tuning Strategy
 
-1. **Most applications**: Use the default (0ms) - immediate memory return with excellent throughput
-2. **Extreme high-throughput**: If you observe performance issues, try 1000ms decay
-3. **Memory debugging**: The default 0ms shows actual memory usage; call `purge_jemalloc/0` to force cleanup
-4. **Benchmarking**: Compare 0ms vs 1000ms to find optimal setting for your workload
+1. **Most applications**: Use the default (1000ms with background_thread) - balanced RSS and latency
+2. **Lowest RSS**: Set decay to 0ms - aggressive memory return, may impact latency under load
+3. **Many threads/schedulers**: Set `COZODB_JEMALLOC_NARENAS=8` to reduce per-arena overhead
+4. **Memory debugging**: Set decay to 0ms; call `purge_jemalloc/0` to force immediate cleanup
+5. **Benchmarking**: Compare 0ms vs 1000ms vs 5000ms to find optimal setting for your workload
 
 ## System Operations
 * Query Management: Monitor running queries with running/1 and terminate problematic queries using kill/2.
