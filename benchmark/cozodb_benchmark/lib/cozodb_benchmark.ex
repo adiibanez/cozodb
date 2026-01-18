@@ -93,7 +93,7 @@ defmodule CozodbBenchmark do
     File.rm_rf!(config.db_path)
     File.mkdir_p!(Path.dirname(config.db_path))
 
-    # Open database
+    # Open database (ResourceArc-based internally, lock-free)
     {:ok, db} = open_db(config)
     Logger.info("Database opened: #{config.engine} at #{config.db_path}")
 
@@ -119,17 +119,17 @@ defmodule CozodbBenchmark do
     report_path = generate_report(metrics, config)
     Logger.info("Report generated: #{report_path}")
 
-    # Cleanup
+    # Cleanup - resource is automatically closed when garbage collected
     :erlang.system_flag(:scheduler_wall_time, false)
-    :ok = :cozodb.close(db)
     Logger.info("Benchmark complete!")
 
     {:ok, report_path, metrics}
   end
 
+  # Open database using the standard API (ResourceArc-based internally)
   defp open_db(%Config{engine: engine, db_path: path}) do
     case engine do
-      :mem -> :cozodb.open(:mem)
+      :mem -> :cozodb.open(:mem, "/tmp/mem_db")
       :sqlite -> :cozodb.open(:sqlite, path <> ".sqlite")
       :rocksdb -> :cozodb.open(:rocksdb, path)
     end
@@ -163,14 +163,8 @@ defmodule CozodbBenchmark do
 
     # Create tables
     Enum.each(tables, fn table ->
-      :ok = :cozodb.create_relation(db, table, %{
-        keys: [{:id, :int}],
-        columns: [
-          {:value, :string},
-          {:counter, :int},
-          {:data, :string}
-        ]
-      })
+      query = ":create #{table} {id: Int => value: String, counter: Int, data: String}"
+      {:ok, _} = :cozodb.run(db, query)
     end)
 
     # Seed tables with data
