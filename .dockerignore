@@ -1,0 +1,33 @@
+# Ignore build artifacts
+_build/
+deps/
+native/cozodb/target/
+priv/crates/
+*.beam
+*.ez
+
+# Ignore git
+.git/
+.gitignore
+
+# Ignore IDE files
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Ignore examples (not needed for benchmark)
+examples/
+
+# Ignore benchmark build artifacts
+benchmark/cozodb_benchmark/_build/
+benchmark/cozodb_benchmark/deps/
+benchmark/cozodb_benchmark/benchmark_reports/
+
+# Ignore docs
+doc/
+docs/
+
+# Ignore test artifacts
+cover/
+logs/
