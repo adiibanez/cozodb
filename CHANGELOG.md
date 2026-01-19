@@ -1,5 +1,11 @@
 # CHANGELOG
 
+# 0.3.1
+
+## Bug Fixes
+* Fixed "cannot allocate memory in static TLS block" error when loading NIF in Docker containers by enabling `disable-initial-exec-tls` for jemalloc
+
+
 # 0.3.0
 
 ## Breaking Changes

@@ -4,8 +4,8 @@ COZODB_TMP_DIR ?= "/tmp/cozodb/"
 
 # RocksDB backend selection:
 #   COZODB_BACKEND=rocksdb (default) - Use cozorocks C++ FFI bridge
-#   COZODB_BACKEND=newrocksdb        - Use rust-rocksdb crate with env var config
-#
+#   COZODB_BACKEND=newrocksdb        - Use rust-rocksdb crate with env var
+#   config
 # IMPORTANT: The two backends are MUTUALLY EXCLUSIVE due to allocator conflicts.
 COZODB_BACKEND ?= rocksdb
 
