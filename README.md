@@ -8,20 +8,15 @@ CozoDB is a FOSS embeddable, transactional, relational-graph-vector database, wi
 
 - [Quick Start](#quick-start)
 - [Installation](#installation)
-  - [Requirements](#requirements)
-  - [Erlang](#erlang)
-  - [Elixir](#elixir)
 - [Basic Usage](#basic-usage)
 - [Storage Engines](#storage-engines)
 - [RocksDB Backends](#rocksdb-backends)
   - [rocksdb (cozorocks)](#1-rocksdb-cozorocks---default)
   - [newrocksdb (rust-rocksdb)](#2-newrocksdb-rust-rocksdb---alternative)
-  - [Building with newrocksdb](#building-with-newrocksdb)
-  - [Environment Variables](#newrocksdb-environment-variables)
 - [Configuration](#configuration)
-  - [jemalloc](#jemalloc-configuration)
+  - [jemalloc](#jemalloc)
   - [Docker](#docker)
-  - [Memory Tuning](#memory-tuning-tips)
+  - [Memory Tuning Tips](#memory-tuning-tips)
 - [Development](#development)
 - [License](#license)
 
@@ -102,22 +97,6 @@ CozoDB supports multiple storage engines:
 | `sqlite` | SQLite backend (good for small datasets, single-writer) |
 | `rocksdb` | RocksDB via cozorocks C++ FFI (default, high-performance) |
 | `newrocksdb` | RocksDB via rust-rocksdb crate (comprehensive env var config) |
-
-### Basic Usage
-
-```erlang
-%% In-memory database
-{ok, Db} = cozodb:open(mem).
-
-%% SQLite database
-{ok, Db} = cozodb:open(sqlite, "/path/to/db.sqlite").
-
-%% RocksDB database (default backend)
-{ok, Db} = cozodb:open(rocksdb, "/path/to/db").
-
-%% New RocksDB backend (if compiled with new-rocksdb-default feature)
-{ok, Db} = cozodb:open(newrocksdb, "/path/to/db").
-```
 
 ## RocksDB Backends
 
@@ -281,7 +260,9 @@ os:putenv("COZO_ROCKSDB_ENABLE_STATISTICS", "true"),
 {ok, Db} = cozodb:open(newrocksdb, "/path/to/db").
 ```
 
-## jemalloc Configuration
+## Configuration
+
+### jemalloc
 
 The NIF uses jemalloc for memory management. Configure via environment variables:
 
@@ -293,27 +274,78 @@ The NIF uses jemalloc for memory management. Configure via environment variables
 | `COZODB_JEMALLOC_NARENAS` | u32 | auto | Number of arenas (optional) |
 
 ### Docker
-#### Build the Rust NIF with C++20 support (required by newer RocksDB headers)
+
+When running in Docker containers, additional configuration is required.
+
+#### C++20 Support
+
+Build the Rust NIF with C++20 support (required by newer RocksDB headers):
+
 ```Dockerfile
 ENV CXXFLAGS="-std=c++20"
 ```
-#### CRITICAL jemalloc Config
-* Set page size for jemalloc to match Linux x86_64 (4KB = 2^12) -- This prevents "page size mismatch" errors when running in Docker containers. Different from macOS Apple Silicon which uses 16KB (LG_PAGE=14) or 64KB pages.
 
-Add the following to your Dockerfile:
+#### jemalloc Page Size
+
+Set page size for jemalloc to match Linux x86_64 (4KB = 2^12). This prevents "page size mismatch" errors when running in Docker containers (different from macOS Apple Silicon which uses 16KB or 64KB pages):
 
 ```Dockerfile
 ENV JEMALLOC_SYS_WITH_LG_PAGE=12
 ```
 
-Also for container compatibility set `JEMALLOC_SYS_WITH_MALLOC_CONF`. This bakes safe defaults directly into the binary - no runtime MALLOC_CONF needed
-See: https://github.com/tikv/jemallocator/blob/master/jemalloc-sys/README.md
+#### jemalloc Container Defaults
+
+For container compatibility, set `JEMALLOC_SYS_WITH_MALLOC_CONF` to bake safe defaults directly into the binary (no runtime `MALLOC_CONF` needed). See the [jemallocator documentation](https://github.com/tikv/jemallocator/blob/master/jemalloc-sys/README.md) for more details.
 
 ```Dockerfile
 ENV JEMALLOC_SYS_WITH_MALLOC_CONF="background_thread:false,dirty_decay_ms:1000,muzzy_decay_ms:1000"
 ```
+
 ### Memory Tuning Tips
 
-- **Low memory usage:** Set decay values to 0 for aggressive memory return
-- **High throughput:** Use default decay (1000ms) with background thread enabled
-- **Large datasets:** Increase write buffer size and max write buffer number
+| Use Case | Recommendation |
+|----------|----------------|
+| **Low memory usage** | Set decay values to 0 for aggressive memory return |
+| **High throughput** | Use default decay (1000ms) with background thread enabled |
+| **Large datasets** | Increase write buffer size and max write buffer number |
+
+## Development
+
+### Upgrading the cozo Dependency
+
+```bash
+cd native/cozodb
+cargo update -p cozo
+```
+
+### Using newrocksdb Backend as a Consumer
+
+By default, cozodb compiles with the `rocksdb` (cozorocks) backend. If you need the `newrocksdb` backend with environment variable configuration in your own project, you have two options:
+
+#### Option A: Fork and Modify (Recommended)
+
+1. Fork the cozodb repository
+2. Modify `native/cozodb/Cargo.toml` to use `new-rocksdb-default` as the default features
+3. Point your dependency to your fork
+
+#### Option B: Pre-build the NIF
+
+Before running `rebar3 compile` in your project:
+
+```bash
+# Clone cozodb
+git clone https://github.com/leapsight/cozodb.git /tmp/cozodb
+cd /tmp/cozodb
+
+# Build with newrocksdb backend
+COZODB_BACKEND=newrocksdb make cargo-build
+
+# Copy the built NIF to your project's _build directory
+# (after rebar3 has fetched dependencies)
+mkdir -p YOUR_PROJECT/_build/default/lib/cozodb/priv/crates/cozodb
+cp priv/crates/cozodb/cozodb.so YOUR_PROJECT/_build/default/lib/cozodb/priv/crates/cozodb/
+```
+
+## License
+
+Apache License 2.0
