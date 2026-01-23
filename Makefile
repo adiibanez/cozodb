@@ -2,6 +2,16 @@ REBAR3 ?= $(shell test -e `which rebar3` 2>/dev/null && which rebar3 || echo "./
 
 COZODB_TMP_DIR ?= "/tmp/cozodb/"
 
+# Jemalloc compile-time configuration for container compatibility
+# This bakes safe defaults directly into the binary - no runtime config needed
+# See: https://github.com/tikv/jemallocator/blob/master/jemalloc-sys/README.md
+#
+# background_thread:false - Prevents crashes in Docker/ECS/container environments
+#                           (background threads can fail after fork() in containers)
+# dirty_decay_ms:1000     - Balanced memory return to OS
+# muzzy_decay_ms:1000     - Balanced memory return to OS
+export JEMALLOC_SYS_WITH_MALLOC_CONF ?= background_thread:false,dirty_decay_ms:1000,muzzy_decay_ms:1000
+
 # RocksDB backend selection:
 #   COZODB_BACKEND=rocksdb (default) - Use cozorocks C++ FFI bridge
 #   COZODB_BACKEND=newrocksdb        - Use rust-rocksdb crate with env var

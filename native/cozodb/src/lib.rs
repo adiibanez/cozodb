@@ -51,6 +51,24 @@ use tikv_jemallocator::Jemalloc;
 #[global_allocator]
 static GLOBAL: Jemalloc = Jemalloc;
 
+// =============================================================================
+// JEMALLOC COMPILE-TIME CONFIGURATION
+// =============================================================================
+// This static variable is read by jemalloc BEFORE main() is entered.
+// It provides safe defaults for containerized environments (Docker, ECS, K8s).
+//
+// Key settings:
+//   - background_thread:false - Prevents crashes after fork() in containers
+//   - dirty_decay_ms:1000     - Balanced memory return to OS (1 second)
+//   - muzzy_decay_ms:1000     - Balanced memory return to OS (1 second)
+//
+// These can be overridden at runtime via MALLOC_CONF environment variable.
+// =============================================================================
+#[cfg(all(feature = "jemalloc", not(feature = "nif_alloc"), not(target_env = "msvc")))]
+#[allow(non_upper_case_globals)]
+#[export_name = "malloc_conf"]
+pub static malloc_conf: &[u8] = b"background_thread:false,dirty_decay_ms:1000,muzzy_decay_ms:1000\0";
+
 // Rust std libs
 
 use core::hash::Hash;
