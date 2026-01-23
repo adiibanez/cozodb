@@ -24,3 +24,5 @@ crates.hrl
 priv/crates
 /doc
 benchmark/cozodb_benchmark/benchmark_reports/*
+/benchmark/data
+/benchmark/reports
