@@ -1,0 +1,57 @@
+# Docker Compose file for CozoDB benchmark
+# Compatible with Docker Compose and AWS ECS
+#
+# The jemalloc configuration is now baked into the binary at compile time
+# via JEMALLOC_SYS_WITH_MALLOC_CONF in the Dockerfile. No runtime config needed.
+#
+# Usage:
+#   docker-compose up --build        # Build and run
+#   docker-compose up                # Run (after build)
+#   docker-compose down              # Stop and remove
+
+services:
+  cozodb-benchmark:
+    build:
+      context: ..
+      dockerfile: benchmark/Dockerfile
+
+    # Use init for proper signal handling and process reaping
+    # In ECS task definition: "initProcessEnabled": true
+    init: true
+
+    # Resource limits (compatible with ECS task definitions)
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 2G
+        reservations:
+          cpus: '1'
+          memory: 1G
+
+    environment:
+      # Optional: Override the compile-time defaults if needed
+      # The defaults (background_thread:false, decay_ms:1000) are baked into the binary
+      - COZODB_JEMALLOC_DIRTY_DECAY_MS=1000
+      - COZODB_JEMALLOC_MUZZY_DECAY_MS=1000
+
+    volumes:
+      - benchmark-data:/tmp/cozodb_benchmark
+      - benchmark-reports:/app/benchmark_reports
+
+    healthcheck:
+      test: ["CMD", "pgrep", "-f", "beam"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  benchmark-data:
+  benchmark-reports:

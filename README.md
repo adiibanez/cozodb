@@ -1,37 +1,57 @@
-cozodb
-=====
+# cozodb
 
-Erlang/BEAM NIF bindings for CozoDB using Rustler.
+Erlang/BEAM NIF bindings for [CozoDB](https://github.com/cozodb/cozo) using Rustler.
 
-CozoDB is a FOSS embeddable, transactional, relational-graph-vector database, wiht a Datalog query engine and time travelling capability, perfect as the long-term memory for LLMs and AI.
+CozoDB is a FOSS embeddable, transactional, relational-graph-vector database, with a Datalog query engine and time travelling capability, perfect as the long-term memory for LLMs and AI.
+
+## Table of Contents
+
+- [Quick Start](#quick-start)
+- [Installation](#installation)
+  - [Requirements](#requirements)
+  - [Erlang](#erlang)
+  - [Elixir](#elixir)
+- [Basic Usage](#basic-usage)
+- [Storage Engines](#storage-engines)
+- [RocksDB Backends](#rocksdb-backends)
+  - [rocksdb (cozorocks)](#1-rocksdb-cozorocks---default)
+  - [newrocksdb (rust-rocksdb)](#2-newrocksdb-rust-rocksdb---alternative)
+  - [Building with newrocksdb](#building-with-newrocksdb)
+  - [Environment Variables](#newrocksdb-environment-variables)
+- [Configuration](#configuration)
+  - [jemalloc](#jemalloc-configuration)
+  - [Docker](#docker)
+  - [Memory Tuning](#memory-tuning-tips)
+- [Development](#development)
+- [License](#license)
+
+## Quick Start
+
+```erlang
+%% Open an in-memory database
+{ok, Db} = cozodb:open(mem).
+
+%% Run a query
+{ok, Result} = cozodb:run(Db, "?[] <- [[1, 2, 3]]").
+
+%% Close the database
+ok = cozodb:close(Db).
+```
 
 ## Installation
 
 ### Requirements
-* Erlang OTP26 and/or Elixir (latest)
-* Rust 1.76.0
-* macOS packages: 
-  * `liblz4`, 
-  * `libssl`
-* Linux packages:
-  * `build-essential` 
-  * `liblz4-dev` 
-  * `libncurses-dev` 
-  * `libsnappy-dev` 
-  * `libssl-dev` 
-  * `liburing-dev`
-  * `liburing-dev` 
-  * `liburing2`
-  * `pkg-config`
 
-## Upgrading `cozo` dependency
-```bash
-cd native/cozodb
-cargo update -p cozo
-```
+| Platform | Dependencies |
+|----------|--------------|
+| **Runtime** | Erlang OTP26+ and/or Elixir (latest) |
+| **Build** | Rust 1.76.0+ |
+| **macOS** | `liblz4`, `libssl` |
+| **Linux** | `build-essential`, `liblz4-dev`, `libncurses-dev`, `libsnappy-dev`, `libssl-dev`, `liburing-dev`, `liburing2`, `pkg-config` |
 
 ### Erlang
-Add the following to your `rebar.config` file.
+
+Add the following to your `rebar.config` file:
 
 ```erlang
 {deps, [
@@ -42,44 +62,34 @@ Add the following to your `rebar.config` file.
 ```
 
 ### Elixir
-Add the following to your `mix.exs` file.
+
+Add the following to your `mix.exs` file:
 
 ```elixir
-  defp deps do
-    [
-        {:cozodb,
-            git: "https://github.com/leapsight/cozodb.git",
-            branch: "master"
-        }
-    ]
+defp deps do
+  [
+    {:cozodb,
+      git: "https://github.com/leapsight/cozodb.git",
+      branch: "master"
+    }
+  ]
+end
 ```
 
-### Using newrocksdb Backend as a Consumer
+## Basic Usage
 
-By default, cozodb compiles with the `rocksdb` (cozorocks) backend. If you need the `newrocksdb` backend with environment variable configuration, you have two options:
+```erlang
+%% In-memory database
+{ok, Db} = cozodb:open(mem).
 
-#### Option A: Fork and Modify (Recommended)
+%% SQLite database
+{ok, Db} = cozodb:open(sqlite, "/path/to/db.sqlite").
 
-1. Fork the cozodb repository
-2. Modify `native/cozodb/Cargo.toml` to use `new-rocksdb-default` as the default features
-3. Point your dependency to your fork
+%% RocksDB database (default backend)
+{ok, Db} = cozodb:open(rocksdb, "/path/to/db").
 
-#### Option B: Pre-build the NIF
-
-Before running `rebar3 compile` in your project:
-
-```bash
-# Clone cozodb
-git clone https://github.com/leapsight/cozodb.git /tmp/cozodb
-cd /tmp/cozodb
-
-# Build with newrocksdb backend
-COZODB_BACKEND=newrocksdb make cargo-build
-
-# Copy the built NIF to your project's _build directory
-# (after rebar3 has fetched dependencies)
-mkdir -p YOUR_PROJECT/_build/default/lib/cozodb/priv/crates/cozodb
-cp priv/crates/cozodb/cozodb.so YOUR_PROJECT/_build/default/lib/cozodb/priv/crates/cozodb/
+%% New RocksDB backend (if compiled with new-rocksdb-default feature)
+{ok, Db} = cozodb:open(newrocksdb, "/path/to/db").
 ```
 
 ## Storage Engines
@@ -282,6 +292,26 @@ The NIF uses jemalloc for memory management. Configure via environment variables
 | `COZODB_JEMALLOC_BACKGROUND_THREAD` | bool | true | Enable background purging thread |
 | `COZODB_JEMALLOC_NARENAS` | u32 | auto | Number of arenas (optional) |
 
+### Docker
+#### Build the Rust NIF with C++20 support (required by newer RocksDB headers)
+```Dockerfile
+ENV CXXFLAGS="-std=c++20"
+```
+#### CRITICAL jemalloc Config
+* Set page size for jemalloc to match Linux x86_64 (4KB = 2^12) -- This prevents "page size mismatch" errors when running in Docker containers. Different from macOS Apple Silicon which uses 16KB (LG_PAGE=14) or 64KB pages.
+
+Add the following to your Dockerfile:
+
+```Dockerfile
+ENV JEMALLOC_SYS_WITH_LG_PAGE=12
+```
+
+Also for container compatibility set `JEMALLOC_SYS_WITH_MALLOC_CONF`. This bakes safe defaults directly into the binary - no runtime MALLOC_CONF needed
+See: https://github.com/tikv/jemallocator/blob/master/jemalloc-sys/README.md
+
+```Dockerfile
+ENV JEMALLOC_SYS_WITH_MALLOC_CONF="background_thread:false,dirty_decay_ms:1000,muzzy_decay_ms:1000"
+```
 ### Memory Tuning Tips
 
 - **Low memory usage:** Set decay values to 0 for aggressive memory return

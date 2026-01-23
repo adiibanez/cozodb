@@ -28,6 +28,18 @@ COPY . .
 
 # Build the Rust NIF with C++20 support (required by newer RocksDB headers)
 ENV CXXFLAGS="-std=c++20"
+
+# CRITICAL: Compile-time jemalloc configuration for container compatibility
+# This bakes safe defaults directly into the binary - no runtime MALLOC_CONF needed
+# See: https://github.com/tikv/jemallocator/blob/master/jemalloc-sys/README.md
+ENV JEMALLOC_SYS_WITH_MALLOC_CONF="background_thread:false,dirty_decay_ms:1000,muzzy_decay_ms:1000"
+
+# CRITICAL: Set page size for jemalloc to match Linux x86_64 (4KB = 2^12)
+# This prevents "page size mismatch" errors when running in Docker containers
+# Different from macOS Apple Silicon which uses 16KB (LG_PAGE=14) or 64KB pages
+ENV JEMALLOC_SYS_WITH_LG_PAGE=12
+
+
 RUN cd native/cozodb && cargo build --release
 
 # Copy the built NIF to priv directory

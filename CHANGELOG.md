@@ -1,4 +1,7 @@
 # CHANGELOG
+# 0.3.2
+## Bug Fixes
+* Fixed an issue when deploying in Docker. Jemalloc crashes when deploying in Docker Compose on Apple Silicon due to differences in OS page sizes - Added documentation to README
 
 # 0.3.1
 
