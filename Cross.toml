@@ -20,12 +20,15 @@ pre-build = [
 
 [target.aarch64-unknown-linux-gnu.env]
 passthrough = ["RUST_BACKTRACE"]
-volumes = []
 # Force clang as C++ compiler with C++20 and correct target
-CXX_aarch64_unknown_linux_gnu = "clang++"
-CC_aarch64_unknown_linux_gnu = "clang"
-CXXFLAGS = "-std=c++20 --target=aarch64-linux-gnu"
-CFLAGS = "--target=aarch64-linux-gnu"
+variables = [
+    ["CXX_aarch64_unknown_linux_gnu", "clang++"],
+    ["CC_aarch64_unknown_linux_gnu", "clang"],
+    ["CXX_aarch64-unknown-linux-gnu", "clang++"],
+    ["CC_aarch64-unknown-linux-gnu", "clang"],
+    ["CXXFLAGS", "-std=c++20 --target=aarch64-linux-gnu -I/usr/aarch64-linux-gnu/include"],
+    ["CFLAGS", "--target=aarch64-linux-gnu"],
+]
 
 # ==============================================================================
 # riscv64 - already works with standard image
