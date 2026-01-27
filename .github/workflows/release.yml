@@ -94,9 +94,27 @@ jobs:
       - name: Rename Artifact with Branch & Version
         shell: bash
         run: |
-          ORIGINAL_NAME="${{ steps.build-crate.outputs.file-name }}"
+          echo "Debug: file-name = ${{ steps.build-crate.outputs.file-name }}"
+          echo "Debug: file-path = ${{ steps.build-crate.outputs.file-path }}"
+          echo "Debug: Listing current directory:"
+          ls -la *.tar.gz 2>/dev/null || echo "No tar.gz files in current dir"
+          ls -la native/cozodb/*.tar.gz 2>/dev/null || echo "No tar.gz files in native/cozodb"
+
+          # Find the artifact file
+          ARTIFACT_PATH="${{ steps.build-crate.outputs.file-path }}"
+          if [ -z "$ARTIFACT_PATH" ] || [ ! -f "$ARTIFACT_PATH" ]; then
+            echo "Output file-path not found, searching for artifact..."
+            ARTIFACT_PATH=$(find . -name "*.tar.gz" -type f | head -1)
+          fi
+
+          if [ -z "$ARTIFACT_PATH" ] || [ ! -f "$ARTIFACT_PATH" ]; then
+            echo "Error: Could not find artifact file"
+            exit 1
+          fi
+
           NEW_NAME="cozodb-${{ env.BRANCH_OR_TAG }}-${{ env.PROJECT_VERSION }}-${{ matrix.job.target }}.tar.gz"
-          mv "${{ steps.build-crate.outputs.file-path }}" "$NEW_NAME"
+          echo "Moving $ARTIFACT_PATH to $NEW_NAME"
+          mv "$ARTIFACT_PATH" "$NEW_NAME"
           echo "RENAMED_ARTIFACT=$NEW_NAME" >> $GITHUB_ENV
       - name: Generate checksum
         shell: bash
