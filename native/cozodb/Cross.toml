@@ -19,28 +19,28 @@ passthrough = [
 
 [target.aarch64-unknown-linux-gnu]
 pre-build = [
-    "apt-get update && apt-get install -y wget gnupg software-properties-common",
+    "export DEBIAN_FRONTEND=noninteractive && apt-get update && apt-get install -y wget gnupg software-properties-common",
     "wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | apt-key add -",
     "echo 'deb http://apt.llvm.org/focal/ llvm-toolchain-focal-14 main' >> /etc/apt/sources.list",
-    "apt-get update && apt-get install -y llvm-14 clang-14 libclang-14-dev",
+    "export DEBIAN_FRONTEND=noninteractive && apt-get update && apt-get install -y llvm-14 clang-14 libclang-14-dev",
     "ln -sf /usr/bin/clang-14 /usr/bin/clang && ln -sf /usr/bin/llvm-config-14 /usr/bin/llvm-config",
 ]
 
 [target.arm-unknown-linux-gnueabihf]
 pre-build = [
-    "apt-get update && apt-get install -y wget gnupg software-properties-common",
+    "export DEBIAN_FRONTEND=noninteractive && apt-get update && apt-get install -y wget gnupg software-properties-common",
     "wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | apt-key add -",
     "echo 'deb http://apt.llvm.org/focal/ llvm-toolchain-focal-14 main' >> /etc/apt/sources.list",
-    "apt-get update && apt-get install -y llvm-14 clang-14 libclang-14-dev",
+    "export DEBIAN_FRONTEND=noninteractive && apt-get update && apt-get install -y llvm-14 clang-14 libclang-14-dev",
     "ln -sf /usr/bin/clang-14 /usr/bin/clang && ln -sf /usr/bin/llvm-config-14 /usr/bin/llvm-config",
 ]
 
 [target.riscv64gc-unknown-linux-gnu]
 pre-build = [
-    "apt-get update && apt-get install -y wget gnupg software-properties-common",
+    "export DEBIAN_FRONTEND=noninteractive && apt-get update && apt-get install -y wget gnupg software-properties-common",
     "wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | apt-key add -",
     "echo 'deb http://apt.llvm.org/focal/ llvm-toolchain-focal-14 main' >> /etc/apt/sources.list",
-    "apt-get update && apt-get install -y llvm-14 clang-14 libclang-14-dev",
+    "export DEBIAN_FRONTEND=noninteractive && apt-get update && apt-get install -y llvm-14 clang-14 libclang-14-dev",
     "ln -sf /usr/bin/clang-14 /usr/bin/clang && ln -sf /usr/bin/llvm-config-14 /usr/bin/llvm-config",
 ]
 
@@ -50,18 +50,18 @@ pre-build = [
 
 [target.x86_64-unknown-linux-musl]
 pre-build = [
-    "apt-get update && apt-get install -y wget gnupg software-properties-common",
+    "export DEBIAN_FRONTEND=noninteractive && apt-get update && apt-get install -y wget gnupg software-properties-common",
     "wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | apt-key add -",
     "echo 'deb http://apt.llvm.org/focal/ llvm-toolchain-focal-14 main' >> /etc/apt/sources.list",
-    "apt-get update && apt-get install -y llvm-14 clang-14 libclang-14-dev",
+    "export DEBIAN_FRONTEND=noninteractive && apt-get update && apt-get install -y llvm-14 clang-14 libclang-14-dev",
     "ln -sf /usr/bin/clang-14 /usr/bin/clang && ln -sf /usr/bin/llvm-config-14 /usr/bin/llvm-config",
 ]
 
 [target.aarch64-unknown-linux-musl]
 pre-build = [
-    "apt-get update && apt-get install -y wget gnupg software-properties-common",
+    "export DEBIAN_FRONTEND=noninteractive && apt-get update && apt-get install -y wget gnupg software-properties-common",
     "wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | apt-key add -",
     "echo 'deb http://apt.llvm.org/focal/ llvm-toolchain-focal-14 main' >> /etc/apt/sources.list",
-    "apt-get update && apt-get install -y llvm-14 clang-14 libclang-14-dev",
+    "export DEBIAN_FRONTEND=noninteractive && apt-get update && apt-get install -y llvm-14 clang-14 libclang-14-dev",
     "ln -sf /usr/bin/clang-14 /usr/bin/clang && ln -sf /usr/bin/llvm-config-14 /usr/bin/llvm-config",
 ]
