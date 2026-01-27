@@ -10,6 +10,11 @@ passthrough = [
     "LIBCLANG_PATH",
     "LLVM_CONFIG_PATH",
     "BINDGEN_EXTRA_CLANG_ARGS",
+    "CXXFLAGS",
+]
+# RocksDB requires C++20
+variables = [
+    ["CXXFLAGS", "-std=c++20"],
 ]
 
 # ==============================================================================
