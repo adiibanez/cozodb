@@ -3,8 +3,6 @@ FROM ghcr.io/cross-rs/aarch64-unknown-linux-gnu:main
 ENV DEBIAN_FRONTEND=noninteractive
 
 # Install newer GCC (10+) for C++20 support required by RocksDB
-# The cross-rs images use crosstool-ng compilers in /x-tools/
-# We install Debian's cross-gcc-10 and symlink it to override the old compiler
 RUN apt-get update && \
     apt-get install -y software-properties-common && \
     add-apt-repository -y ppa:ubuntu-toolchain-r/test && \
@@ -22,16 +20,12 @@ RUN apt-get update && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
-# The cross-rs image uses crosstool-ng with aarch64-unknown-linux-gnu- prefix
-# We need to create wrapper scripts that use the GCC 10 cross-compiler
-RUN mkdir -p /usr/local/bin && \
-    echo '#!/bin/bash\nexec /usr/bin/aarch64-linux-gnu-gcc-10 "$@"' > /usr/local/bin/aarch64-unknown-linux-gnu-gcc && \
-    echo '#!/bin/bash\nexec /usr/bin/aarch64-linux-gnu-g++-10 "$@"' > /usr/local/bin/aarch64-unknown-linux-gnu-g++ && \
-    chmod +x /usr/local/bin/aarch64-unknown-linux-gnu-gcc && \
-    chmod +x /usr/local/bin/aarch64-unknown-linux-gnu-g++
+# The cc crate uses CXX_aarch64_unknown_linux_gnu=aarch64-linux-gnu-g++
+# We need to make sure aarch64-linux-gnu-g++ points to GCC 10
+RUN update-alternatives --install /usr/bin/aarch64-linux-gnu-gcc aarch64-linux-gnu-gcc /usr/bin/aarch64-linux-gnu-gcc-10 100 && \
+    update-alternatives --install /usr/bin/aarch64-linux-gnu-g++ aarch64-linux-gnu-g++ /usr/bin/aarch64-linux-gnu-g++-10 100 && \
+    update-alternatives --set aarch64-linux-gnu-gcc /usr/bin/aarch64-linux-gnu-gcc-10 && \
+    update-alternatives --set aarch64-linux-gnu-g++ /usr/bin/aarch64-linux-gnu-g++-10
 
-# Ensure /usr/local/bin is first in PATH
-ENV PATH="/usr/local/bin:${PATH}"
-
-# Verify the wrapper works
-RUN aarch64-unknown-linux-gnu-g++ --version
+# Verify GCC version (should show GCC 10)
+RUN aarch64-linux-gnu-g++ --version | head -1

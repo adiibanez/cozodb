@@ -3,8 +3,6 @@ FROM ghcr.io/cross-rs/arm-unknown-linux-gnueabihf:main
 ENV DEBIAN_FRONTEND=noninteractive
 
 # Install newer GCC (10+) for C++20 support required by RocksDB
-# The cross-rs images use crosstool-ng compilers in /x-tools/
-# We install Debian's cross-gcc-10 and symlink it to override the old compiler
 RUN apt-get update && \
     apt-get install -y software-properties-common && \
     add-apt-repository -y ppa:ubuntu-toolchain-r/test && \
@@ -22,16 +20,12 @@ RUN apt-get update && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
-# The cross-rs image uses crosstool-ng with arm-unknown-linux-gnueabihf- prefix
-# We need to create wrapper scripts that use the GCC 10 cross-compiler
-RUN mkdir -p /usr/local/bin && \
-    echo '#!/bin/bash\nexec /usr/bin/arm-linux-gnueabihf-gcc-10 "$@"' > /usr/local/bin/arm-unknown-linux-gnueabihf-gcc && \
-    echo '#!/bin/bash\nexec /usr/bin/arm-linux-gnueabihf-g++-10 "$@"' > /usr/local/bin/arm-unknown-linux-gnueabihf-g++ && \
-    chmod +x /usr/local/bin/arm-unknown-linux-gnueabihf-gcc && \
-    chmod +x /usr/local/bin/arm-unknown-linux-gnueabihf-g++
+# The cc crate uses CXX_arm_unknown_linux_gnueabihf=arm-linux-gnueabihf-g++
+# We need to make sure arm-linux-gnueabihf-g++ points to GCC 10
+RUN update-alternatives --install /usr/bin/arm-linux-gnueabihf-gcc arm-linux-gnueabihf-gcc /usr/bin/arm-linux-gnueabihf-gcc-10 100 && \
+    update-alternatives --install /usr/bin/arm-linux-gnueabihf-g++ arm-linux-gnueabihf-g++ /usr/bin/arm-linux-gnueabihf-g++-10 100 && \
+    update-alternatives --set arm-linux-gnueabihf-gcc /usr/bin/arm-linux-gnueabihf-gcc-10 && \
+    update-alternatives --set arm-linux-gnueabihf-g++ /usr/bin/arm-linux-gnueabihf-g++-10
 
-# Ensure /usr/local/bin is first in PATH
-ENV PATH="/usr/local/bin:${PATH}"
-
-# Verify the wrapper works
-RUN arm-unknown-linux-gnueabihf-g++ --version
+# Verify GCC version (should show GCC 10)
+RUN arm-linux-gnueabihf-g++ --version | head -1

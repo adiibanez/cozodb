@@ -3,7 +3,6 @@ FROM ghcr.io/cross-rs/aarch64-unknown-linux-musl:main
 ENV DEBIAN_FRONTEND=noninteractive
 
 # Install newer GCC (10+) for C++20 support required by RocksDB
-# For aarch64-musl, we need aarch64 cross-compiler with C++20 support
 RUN apt-get update && \
     apt-get install -y software-properties-common && \
     add-apt-repository -y ppa:ubuntu-toolchain-r/test && \
@@ -21,16 +20,28 @@ RUN apt-get update && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
-# The cross-rs musl image uses aarch64-unknown-linux-musl- prefix
-# We create wrapper scripts that use GCC 10 aarch64 cross-compiler
-RUN mkdir -p /usr/local/bin && \
-    echo '#!/bin/bash\nexec /usr/bin/aarch64-linux-gnu-gcc-10 "$@"' > /usr/local/bin/aarch64-unknown-linux-musl-gcc && \
-    echo '#!/bin/bash\nexec /usr/bin/aarch64-linux-gnu-g++-10 "$@"' > /usr/local/bin/aarch64-unknown-linux-musl-g++ && \
-    chmod +x /usr/local/bin/aarch64-unknown-linux-musl-gcc && \
-    chmod +x /usr/local/bin/aarch64-unknown-linux-musl-g++
+# Set GCC 10 as default host compiler
+RUN update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-10 100 && \
+    update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-10 100 && \
+    update-alternatives --set gcc /usr/bin/gcc-10 && \
+    update-alternatives --set g++ /usr/bin/g++-10
 
-# Ensure /usr/local/bin is first in PATH
-ENV PATH="/usr/local/bin:${PATH}"
+# Set GCC 10 as default aarch64 cross-compiler
+RUN update-alternatives --install /usr/bin/aarch64-linux-gnu-gcc aarch64-linux-gnu-gcc /usr/bin/aarch64-linux-gnu-gcc-10 100 && \
+    update-alternatives --install /usr/bin/aarch64-linux-gnu-g++ aarch64-linux-gnu-g++ /usr/bin/aarch64-linux-gnu-g++-10 100 && \
+    update-alternatives --set aarch64-linux-gnu-gcc /usr/bin/aarch64-linux-gnu-gcc-10 && \
+    update-alternatives --set aarch64-linux-gnu-g++ /usr/bin/aarch64-linux-gnu-g++-10
 
-# Verify the wrapper works
-RUN aarch64-unknown-linux-musl-g++ --version
+# For musl targets, the cross-rs image may use aarch64-linux-musl-g++
+# Create symlinks if the musl compiler wrapper exists
+RUN if [ -f /usr/bin/aarch64-linux-musl-g++ ]; then \
+        mv /usr/bin/aarch64-linux-musl-g++ /usr/bin/aarch64-linux-musl-g++.old && \
+        ln -s /usr/bin/aarch64-linux-gnu-g++-10 /usr/bin/aarch64-linux-musl-g++; \
+    fi && \
+    if [ -f /usr/bin/aarch64-linux-musl-gcc ]; then \
+        mv /usr/bin/aarch64-linux-musl-gcc /usr/bin/aarch64-linux-musl-gcc.old && \
+        ln -s /usr/bin/aarch64-linux-gnu-gcc-10 /usr/bin/aarch64-linux-musl-gcc; \
+    fi
+
+# Verify GCC version
+RUN aarch64-linux-gnu-g++ --version | head -1
