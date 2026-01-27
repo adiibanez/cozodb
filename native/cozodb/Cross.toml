@@ -1,8 +1,5 @@
 # Cross compilation configuration for cozodb NIF
 # See: https://github.com/cross-rs/cross
-#
-# The cross images ship with libclang 3.8.x, but bindgen requires 5.0+
-# We use custom images that have LLVM and GCC 10+ pre-installed for C++20 support.
 
 [build.env]
 passthrough = [
@@ -10,41 +7,31 @@ passthrough = [
     "LIBCLANG_PATH",
     "LLVM_CONFIG_PATH",
     "BINDGEN_EXTRA_CLANG_ARGS",
-    "CXXFLAGS",
-]
-# RocksDB requires C++20
-variables = [
-    ["CXXFLAGS", "-std=c++2a"],
 ]
 
 # ==============================================================================
-# Linux GNU targets - custom images with GCC 10+ for C++20 support
+# aarch64-unknown-linux-gnu - use clang for C++20 support
 # ==============================================================================
-
 [target.aarch64-unknown-linux-gnu]
-# Custom image with GCC 10 cross-compiler for C++20 support
-image = "ghcr.io/adiibanez/cozodb-cross-aarch64-unknown-linux-gnu:latest"
+image = "ghcr.io/cross-rs/aarch64-unknown-linux-gnu:main"
+pre-build = [
+    "apt-get update && apt-get install -y libclang-dev clang llvm lld",
+]
 
-[target.arm-unknown-linux-gnueabihf]
-# Custom image with GCC 10 cross-compiler for C++20 support
-image = "ghcr.io/adiibanez/cozodb-cross-arm-unknown-linux-gnueabihf:latest"
+[target.aarch64-unknown-linux-gnu.env]
+passthrough = ["RUST_BACKTRACE"]
+volumes = []
+# Force clang as C++ compiler with C++20 and correct target
+CXX_aarch64_unknown_linux_gnu = "clang++"
+CC_aarch64_unknown_linux_gnu = "clang"
+CXXFLAGS = "-std=c++20 --target=aarch64-linux-gnu"
+CFLAGS = "--target=aarch64-linux-gnu"
 
+# ==============================================================================
+# riscv64 - already works with standard image
+# ==============================================================================
 [target.riscv64gc-unknown-linux-gnu]
-# riscv64 uses newer GCC that already supports C++20, use standard image
 image = "ghcr.io/cross-rs/riscv64gc-unknown-linux-gnu:main"
 pre-build = [
-    "export DEBIAN_FRONTEND=noninteractive",
     "apt-get update && apt-get install -y libclang-dev clang llvm",
 ]
-
-# ==============================================================================
-# Linux MUSL targets - custom images with GCC 10+ for C++20 support
-# ==============================================================================
-
-[target.x86_64-unknown-linux-musl]
-# Custom image with GCC 10 for C++20 support
-image = "ghcr.io/adiibanez/cozodb-cross-x86_64-unknown-linux-musl:latest"
-
-[target.aarch64-unknown-linux-musl]
-# Custom image with GCC 10 for C++20 support
-image = "ghcr.io/adiibanez/cozodb-cross-aarch64-unknown-linux-musl:latest"

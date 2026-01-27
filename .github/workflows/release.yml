@@ -22,30 +22,16 @@ jobs:
         nif:
           - '2.17'
         job:
-          # macOS targets (native builds)
+          # macOS targets (native builds) - WORKING
           - target: aarch64-apple-darwin
             os: macos-latest
           - target: x86_64-apple-darwin
             os: macos-latest
-          # Linux native build
+          # Linux x86_64 native build - WORKING
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-24.04
-          # Linux cross-compiled targets
-          # Note: These require custom Docker images with GCC 10+ for C++20 support
-          # The images are built by the build-cross-images.yml workflow
-          - target: riscv64gc-unknown-linux-gnu
-            os: ubuntu-24.04
-            use-cross: true
-          - target: arm-unknown-linux-gnueabihf
-            os: ubuntu-24.04
-            use-cross: true
+          # Linux ARM64 cross-compiled - testing clang approach
           - target: aarch64-unknown-linux-gnu
-            os: ubuntu-24.04
-            use-cross: true
-          - target: aarch64-unknown-linux-musl
-            os: ubuntu-24.04
-            use-cross: true
-          - target: x86_64-unknown-linux-musl
             os: ubuntu-24.04
             use-cross: true
     steps:
