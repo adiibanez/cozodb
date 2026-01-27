@@ -1,0 +1,25 @@
+FROM ghcr.io/cross-rs/x86_64-unknown-linux-musl:main
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install newer GCC (10+) for C++20 support required by RocksDB
+RUN apt-get update && \
+    apt-get install -y software-properties-common && \
+    add-apt-repository -y ppa:ubuntu-toolchain-r/test && \
+    apt-get update && \
+    apt-get install -y \
+        gcc-10 \
+        g++-10 \
+        libclang-dev \
+        clang \
+        llvm \
+        lld && \
+    # Set GCC 10 as default host compiler
+    update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-10 100 && \
+    update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-10 100 && \
+    # Clean up
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
+# Verify GCC version
+RUN g++ --version

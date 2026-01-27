@@ -3,6 +3,7 @@ name: Build precompiled NIFs
   push:
     branches:
       - main
+      - 'fix/**'
     tags:
       - '*'
   workflow_dispatch:
@@ -29,24 +30,24 @@ jobs:
           # Linux native build
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-24.04
-          # Linux cross-compiled (riscv64 has newer GCC that supports C++20)
+          # Linux cross-compiled targets
+          # Note: These require custom Docker images with GCC 10+ for C++20 support
+          # The images are built by the build-cross-images.yml workflow
           - target: riscv64gc-unknown-linux-gnu
             os: ubuntu-24.04
             use-cross: true
-          # DISABLED: These targets have GCC too old for C++20 (RocksDB requirement)
-          # TODO: Create custom cross images with GCC 10+ to re-enable these
-          # - target: arm-unknown-linux-gnueabihf
-          #   os: ubuntu-24.04
-          #   use-cross: true
-          # - target: aarch64-unknown-linux-gnu
-          #   os: ubuntu-24.04
-          #   use-cross: true
-          # - target: aarch64-unknown-linux-musl
-          #   os: ubuntu-24.04
-          #   use-cross: true
-          # - target: x86_64-unknown-linux-musl
-          #   os: ubuntu-24.04
-          #   use-cross: true
+          - target: arm-unknown-linux-gnueabihf
+            os: ubuntu-24.04
+            use-cross: true
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04
+            use-cross: true
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-24.04
+            use-cross: true
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-24.04
+            use-cross: true
     steps:
       - name: Checkout source code
         uses: actions/checkout@v4
