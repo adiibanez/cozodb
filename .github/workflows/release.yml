@@ -76,11 +76,15 @@ jobs:
         if: matrix.job.use-cross == true
         run: |
           cargo install cross --git https://github.com/cross-rs/cross
-      - name: Set LIBCLANG_PATH for cross builds
+      - name: Set cross environment
         if: matrix.job.use-cross == true
         run: |
+          echo "CROSS_CONFIG=${{ github.workspace }}/Cross.toml" >> $GITHUB_ENV
           echo "LIBCLANG_PATH=/usr/lib/llvm-14/lib" >> $GITHUB_ENV
           echo "LLVM_CONFIG_PATH=/usr/bin/llvm-config-14" >> $GITHUB_ENV
+          # Debug: show Cross.toml content
+          echo "Cross.toml content:"
+          cat ${{ github.workspace }}/Cross.toml
       - name: Build the project
         id: build-crate
         uses: philss/rustler-precompiled-action@v1.1.4
