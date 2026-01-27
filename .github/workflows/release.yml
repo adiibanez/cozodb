@@ -33,9 +33,6 @@ jobs:
           # Linux ARM64 native build on ARM runner
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-24.04-arm
-          # Windows x86_64 native build
-          - target: x86_64-pc-windows-msvc
-            os: windows-latest
     steps:
       - name: Checkout source code
         uses: actions/checkout@v4
@@ -65,11 +62,6 @@ jobs:
         if: runner.os == 'macOS'
         run: |
           brew install llvm pkg-config
-      - name: Install build dependencies (Windows)
-        if: runner.os == 'Windows'
-        run: |
-          choco install llvm -y
-          echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> $env:GITHUB_ENV
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
