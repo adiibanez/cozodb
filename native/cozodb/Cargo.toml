@@ -99,6 +99,14 @@ jemalloc = ["tikv-jemallocator", "tikv-jemalloc-ctl", "tikv-jemalloc-sys", "cozo
 # This gives best of both worlds: BEAM-tracked Rust memory + jemalloc stats for RocksDB
 nif_alloc_rocksdb_jemalloc = ["nif_alloc", "tikv-jemalloc-ctl", "tikv-jemalloc-sys", "cozo/rocksdb-jemalloc"]
 
-[target.'cfg(target_os = "linux")'.dependencies]
-cozo = { git = "https://github.com/aramallo/cozo.git", tag = "v0.8.2-leapsight", features = ["io-uring"] }
+# Enable io-uring for async I/O on Linux (requires liburing-dev)
+# Only enable this for native Linux builds, not cross-compilation
+io-uring = ["cozo/io-uring"]
+
+# io-uring support is now opt-in via the "io-uring" feature below.
+# This allows cross-compilation to work without liburing.
+# To enable io-uring for native Linux builds, use: --features io-uring
+#
+# [target.'cfg(target_os = "linux")'.dependencies]
+# cozo = { git = "https://github.com/aramallo/cozo.git", tag = "v0.8.2-leapsight", features = ["io-uring"] }
 
