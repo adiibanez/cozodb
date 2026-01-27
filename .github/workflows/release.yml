@@ -30,10 +30,9 @@ jobs:
           # Linux x86_64 native build - WORKING
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-24.04
-          # Linux ARM64 cross-compiled - testing clang approach
+          # Linux ARM64 native build on ARM runner
           - target: aarch64-unknown-linux-gnu
-            os: ubuntu-24.04
-            use-cross: true
+            os: ubuntu-24.04-arm
           # Windows x86_64 native build
           - target: x86_64-pc-windows-msvc
             os: windows-latest
