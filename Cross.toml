@@ -14,7 +14,7 @@ passthrough = [
 ]
 # RocksDB requires C++20
 variables = [
-    ["CXXFLAGS", "-std=c++20"],
+    ["CXXFLAGS", "-std=c++2a"],
 ]
 
 # ==============================================================================
