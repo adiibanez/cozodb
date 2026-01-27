@@ -21,27 +21,32 @@ jobs:
         nif:
           - '2.17'
         job:
-          - target: arm-unknown-linux-gnueabihf
-            os: ubuntu-24.04
-            use-cross: true
-          - target: aarch64-unknown-linux-gnu
-            os: ubuntu-24.04
-            use-cross: true
-          - target: aarch64-unknown-linux-musl
-            os: ubuntu-24.04
-            use-cross: true
+          # macOS targets (native builds)
           - target: aarch64-apple-darwin
             os: macos-latest
+          - target: x86_64-apple-darwin
+            os: macos-latest
+          # Linux native build
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-24.04
+          # Linux cross-compiled (riscv64 has newer GCC that supports C++20)
           - target: riscv64gc-unknown-linux-gnu
             os: ubuntu-24.04
             use-cross: true
-          - target: x86_64-apple-darwin
-            os: macos-latest
-          - target: x86_64-unknown-linux-gnu
-            os: ubuntu-24.04
-          - target: x86_64-unknown-linux-musl
-            os: ubuntu-24.04
-            use-cross: true
+          # DISABLED: These targets have GCC too old for C++20 (RocksDB requirement)
+          # TODO: Create custom cross images with GCC 10+ to re-enable these
+          # - target: arm-unknown-linux-gnueabihf
+          #   os: ubuntu-24.04
+          #   use-cross: true
+          # - target: aarch64-unknown-linux-gnu
+          #   os: ubuntu-24.04
+          #   use-cross: true
+          # - target: aarch64-unknown-linux-musl
+          #   os: ubuntu-24.04
+          #   use-cross: true
+          # - target: x86_64-unknown-linux-musl
+          #   os: ubuntu-24.04
+          #   use-cross: true
     steps:
       - name: Checkout source code
         uses: actions/checkout@v4
