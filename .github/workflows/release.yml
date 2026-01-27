@@ -57,6 +57,8 @@ jobs:
           else
             BRANCH_OR_TAG="${GITHUB_REF#refs/heads/}"
           fi
+          # Sanitize branch name: replace / with -
+          BRANCH_OR_TAG="${BRANCH_OR_TAG//\//-}"
           echo "BRANCH_OR_TAG=$BRANCH_OR_TAG" >> $GITHUB_ENV
       - name: Install build dependencies (Linux)
         if: runner.os == 'Linux'
