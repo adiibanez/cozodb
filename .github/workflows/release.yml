@@ -33,9 +33,10 @@ jobs:
           # Linux ARM64 native build on ARM runner
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-24.04-arm
-          # Windows x86_64 native build
+          # Windows x86_64 native build (no jemalloc)
           - target: x86_64-pc-windows-msvc
             os: windows-latest
+            cargo-args: '--no-default-features --features "cozo/storage-sqlite,cozo/storage-rocksdb,cozo/graph-algo"'
     steps:
       - name: Checkout source code
         uses: actions/checkout@v4
@@ -105,6 +106,7 @@ jobs:
           nif-version: '${{ matrix.nif }}'
           use-cross: '${{ matrix.job.use-cross }}'
           project-dir: native/cozodb
+          cargo-args: '${{ matrix.job.cargo-args }}'
       - name: Rename Artifact with Branch & Version
         shell: bash
         run: |
