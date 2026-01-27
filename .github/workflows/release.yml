@@ -81,19 +81,10 @@ jobs:
       - name: Set cross environment
         if: matrix.job.use-cross == true
         run: |
-          echo "CROSS_CONFIG=${{ github.workspace }}/Cross.toml" >> $GITHUB_ENV
-          echo "LIBCLANG_PATH=/usr/lib/llvm-14/lib" >> $GITHUB_ENV
-          echo "LLVM_CONFIG_PATH=/usr/bin/llvm-config-14" >> $GITHUB_ENV
-          # Also set in native/cozodb for the action
+          # Point cross to our config file
           echo "CROSS_CONFIG=${{ github.workspace }}/native/cozodb/Cross.toml" >> $GITHUB_ENV
-          # Debug: show Cross.toml content and cross version
-          echo "Cross version:"
-          cross --version
-          echo ""
-          echo "Cross.toml in workspace root:"
-          cat ${{ github.workspace }}/Cross.toml
-          echo ""
-          echo "Cross.toml in native/cozodb:"
+          # Debug: show Cross.toml content
+          echo "Cross.toml content:"
           cat ${{ github.workspace }}/native/cozodb/Cross.toml
       - name: Build the project
         id: build-crate
