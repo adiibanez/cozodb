@@ -3,6 +3,8 @@ FROM ghcr.io/cross-rs/x86_64-unknown-linux-musl:main
 ENV DEBIAN_FRONTEND=noninteractive
 
 # Install newer GCC (10+) for C++20 support required by RocksDB
+# For musl targets, we install host GCC 10 for C++ compilation
+# The musl libc linking is handled by the existing musl toolchain
 RUN apt-get update && \
     apt-get install -y software-properties-common && \
     add-apt-repository -y ppa:ubuntu-toolchain-r/test && \
@@ -14,12 +16,21 @@ RUN apt-get update && \
         clang \
         llvm \
         lld && \
-    # Set GCC 10 as default host compiler
-    update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-10 100 && \
-    update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-10 100 && \
     # Clean up
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
+# The cross-rs musl image uses x86_64-unknown-linux-musl- prefix
+# We need to create wrapper scripts that use GCC 10 for C++ compilation
+# but preserve the musl linking
+RUN mkdir -p /usr/local/bin && \
+    echo '#!/bin/bash\nexec /usr/bin/gcc-10 "$@"' > /usr/local/bin/x86_64-unknown-linux-musl-gcc && \
+    echo '#!/bin/bash\nexec /usr/bin/g++-10 "$@"' > /usr/local/bin/x86_64-unknown-linux-musl-g++ && \
+    chmod +x /usr/local/bin/x86_64-unknown-linux-musl-gcc && \
+    chmod +x /usr/local/bin/x86_64-unknown-linux-musl-g++
+
+# Ensure /usr/local/bin is first in PATH
+ENV PATH="/usr/local/bin:${PATH}"
+
 # Verify GCC version
-RUN g++ --version
+RUN g++-10 --version
