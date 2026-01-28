@@ -36,7 +36,7 @@ jobs:
           # Windows x86_64 native build (no jemalloc)
           - target: x86_64-pc-windows-msvc
             os: windows-latest
-            cargo-args: --no-default-features --features cozo/storage-sqlite,cozo/storage-rocksdb,cozo/graph-algo
+            cargo-args: '--no-default-features --features cozo/storage-sqlite --features cozo/storage-rocksdb --features cozo/graph-algo'
     steps:
       - name: Checkout source code
         uses: actions/checkout@v4
