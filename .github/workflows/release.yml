@@ -33,10 +33,9 @@ jobs:
           # Linux ARM64 native build on ARM runner
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-24.04-arm
-          # Windows x86_64 native build (no jemalloc)
+          # Windows x86_64 native build
           - target: x86_64-pc-windows-msvc
             os: windows-latest
-            cargo-args: '--no-default-features --features cozo/storage-sqlite --features cozo/storage-rocksdb --features cozo/graph-algo'
     steps:
       - name: Checkout source code
         uses: actions/checkout@v4
