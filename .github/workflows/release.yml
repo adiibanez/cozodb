@@ -33,9 +33,10 @@ jobs:
           # Linux ARM64 native build on ARM runner
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-24.04-arm
-          # Windows x86_64 native build
+          # Windows x86_64 native build (no jemalloc - not available on Windows)
           - target: x86_64-pc-windows-msvc
             os: windows-latest
+            cargo-args: --no-default-features --features windows-default
     steps:
       - name: Checkout source code
         uses: actions/checkout@v4
@@ -73,9 +74,6 @@ jobs:
           echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> $env:GITHUB_ENV
           # Force C++20 for MSVC (RocksDB requires it)
           echo "CXXFLAGS=/std:c++20" >> $env:GITHUB_ENV
-          # Disable jemalloc on Windows (not available)
-          echo "JEMALLOC_OVERRIDE=" >> $env:GITHUB_ENV
-          echo "ROCKSDB_DISABLE_JEMALLOC=1" >> $env:GITHUB_ENV
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:

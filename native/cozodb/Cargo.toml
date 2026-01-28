@@ -49,6 +49,13 @@ default = [
     "jemalloc"  # jemalloc with 0ms decay: best throughput + low memory retention
 ]
 
+# Windows default - same as default but without jemalloc (not available on Windows/MSVC)
+windows-default = [
+    "cozo/storage-sqlite",
+    "cozo/storage-rocksdb",
+    "cozo/graph-algo",
+]
+
 # IMPORTANT: storage-rocksdb (cozorocks) and storage-new-rocksdb (rust-rocksdb) are
 # MUTUALLY EXCLUSIVE. Both link to RocksDB with different allocator configurations,
 # causing "pointer being freed was not allocated" crashes when used together.
