@@ -23,13 +23,9 @@ num_cpus = "1.17.0"
 # Only compile on non-MSVC platforms when jemalloc feature is enabled
 # Note: disable-initial-exec-tls is required for Docker/dlopen() compatibility
 # to avoid "cannot allocate memory in static TLS block" errors
-[target.'cfg(not(target_env = "msvc"))'.dependencies]
-tikv-jemallocator = { version = "0.6", features = ["stats", "profiling", "disable_initial_exec_tls"], optional = true }
-tikv-jemalloc-ctl = { version = "0.6", features = ["stats", "profiling"], optional = true }
-tikv-jemalloc-sys = { version = "0.6", features = ["stats", "profiling", "disable_initial_exec_tls"], optional = true }
-
 # ==============================================================================
 # Pin the following to match cozo's working version
+# ==============================================================================
 graph = "=0.3.1"  # uses graph_builder 0.4.0
 graph_builder = "=0.4.0"  # uses rayon 1.10.0
 rayon = "=1.10.0"
@@ -39,7 +35,15 @@ serde = { version = "1.0.199", features = ["derive"] }
 serde_derive = "1.0.199"
 lazy_static = "1.4.0"
 crossbeam = "0.8.4"
-# ==============================================================================
+
+# Memory allocator - jemalloc (optional, controlled by feature flag)
+# Only compile on non-MSVC platforms when jemalloc feature is enabled
+# Note: disable-initial-exec-tls is required for Docker/dlopen() compatibility
+# to avoid "cannot allocate memory in static TLS block" errors
+[target.'cfg(not(target_env = "msvc"))'.dependencies]
+tikv-jemallocator = { version = "0.6", features = ["stats", "profiling", "disable_initial_exec_tls"], optional = true }
+tikv-jemalloc-ctl = { version = "0.6", features = ["stats", "profiling"], optional = true }
+tikv-jemalloc-sys = { version = "0.6", features = ["stats", "profiling", "disable_initial_exec_tls"], optional = true }
 
 [features]
 default = [
