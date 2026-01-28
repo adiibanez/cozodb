@@ -8,9 +8,12 @@
     verify_checksum/2
 ]).
 
--define(GITHUB_REPO, "leapsight/cozodb").
+%% GitHub repository for downloading precompiled NIFs
+%% Can be overridden with environment variable COZODB_GITHUB_REPO
+-define(DEFAULT_GITHUB_REPO, "adiibanez/cozodb").
 -define(NIF_VERSION, "2.17").
 -define(APP_NAME, cozodb).
+-define(CRATE_NAME, "cozodb").
 
 -type platform_info() :: #{
     os => linux | darwin | windows,
@@ -61,24 +64,17 @@ download_precompiled(Version) ->
     CrateDir = filename:join([PrivDir, "crates", "cozodb"]),
     ok = filelib:ensure_dir(filename:join(CrateDir, "dummy")),
 
-    Tag = Version,
-    ArtifactName = build_artifact_name(Tag, Version, Target),
-    Url = build_download_url(Tag, ArtifactName),
-    ChecksumUrl = Url ++ ".sha256",
+    ArtifactName = build_artifact_name(Version, Target),
+    Url = build_download_url(Version, ArtifactName),
 
     TmpDir = filename:join([PrivDir, "tmp"]),
     ok = filelib:ensure_dir(filename:join(TmpDir, "dummy")),
     TmpFile = filename:join(TmpDir, ArtifactName),
 
+    logger:info("Downloading precompiled NIF from: ~s", [Url]),
     case download_file(Url, TmpFile) of
         ok ->
-            case download_and_verify_checksum(ChecksumUrl, TmpFile) of
-                ok ->
-                    extract_and_install(TmpFile, CrateDir);
-                {error, _} = ChecksumErr ->
-                    file:delete(TmpFile),
-                    ChecksumErr
-            end;
+            extract_and_install(TmpFile, CrateDir, Version, Target);
         {error, _} = DownloadErr ->
             DownloadErr
     end.
@@ -107,8 +103,12 @@ try_load_precompiled(Opts) ->
     PrivDir = code:priv_dir(?APP_NAME),
     NifPath = filename:join([PrivDir, "crates", "cozodb", "cozodb"]),
 
-    case filelib:is_file(NifPath ++ ".so") orelse
-         filelib:is_file(NifPath ++ ".dylib") of
+    %% Check for NIF file with any extension (.so, .dylib, .dll)
+    NifExists = filelib:is_file(NifPath ++ ".so") orelse
+                filelib:is_file(NifPath ++ ".dylib") orelse
+                filelib:is_file(NifPath ++ ".dll"),
+
+    case NifExists of
         true ->
             ForceDownload = proplists:get_value(force_download, Opts, false),
             case ForceDownload of
@@ -210,14 +210,41 @@ build_target(windows, Arch, msvc) ->
 build_target(_, _, _) ->
     <<"unknown">>.
 
-build_artifact_name(Tag, Version, Target) ->
-    lists:flatten(io_lib:format("cozodb-~s-~s-~s.tar.gz", [Tag, Version, Target])).
+%% Build artifact name in rustler_precompiled format:
+%% lib{crate}-v{version}-nif-{nif_version}-{target}.{ext}.tar.gz
+build_artifact_name(Version, Target) ->
+    Ext = get_lib_extension(Target),
+    lists:flatten(io_lib:format(
+        "lib~s-v~s-nif-~s-~s~s.tar.gz",
+        [?CRATE_NAME, Version, ?NIF_VERSION, Target, Ext]
+    )).
 
-build_download_url(Tag, ArtifactName) ->
+%% Build the download URL for GitHub releases
+build_download_url(Version, ArtifactName) ->
+    GithubRepo = get_github_repo(),
+    Tag = "v" ++ Version,
     lists:flatten(io_lib:format(
         "https://github.com/~s/releases/download/~s/~s",
-        [?GITHUB_REPO, Tag, ArtifactName]
+        [GithubRepo, Tag, ArtifactName]
     )).
+
+%% Get the library file extension for the target
+get_lib_extension(Target) ->
+    TargetStr = binary_to_list(Target),
+    case string:find(TargetStr, "windows") of
+        nomatch ->
+            %% Both Linux and macOS use .so for Erlang NIFs
+            ".so";
+        _ ->
+            ".dll"
+    end.
+
+%% Get GitHub repo from environment or default
+get_github_repo() ->
+    case os:getenv("COZODB_GITHUB_REPO") of
+        false -> ?DEFAULT_GITHUB_REPO;
+        Repo -> Repo
+    end.
 
 download_file(Url, DestPath) ->
     ensure_http_client(),
@@ -254,12 +281,36 @@ download_and_verify_checksum(ChecksumUrl, FilePath) ->
             {error, {checksum_download_failed, Reason}}
     end.
 
-extract_and_install(TarFile, DestDir) ->
+%% Extract tar.gz and rename the NIF file to standard name
+extract_and_install(TarFile, DestDir, Version, Target) ->
     case erl_tar:extract(TarFile, [{cwd, DestDir}, compressed]) of
         ok ->
             file:delete(TarFile),
-            NifPath = filename:join(DestDir, "cozodb"),
-            {ok, NifPath};
+            %% The extracted file has rustler_precompiled naming:
+            %% lib{crate}-v{version}-nif-{nif_version}-{target}.{ext}
+            Ext = get_lib_extension(Target),
+            ExtractedName = lists:flatten(io_lib:format(
+                "lib~s-v~s-nif-~s-~s~s",
+                [?CRATE_NAME, Version, ?NIF_VERSION, Target, Ext]
+            )),
+            ExtractedPath = filename:join(DestDir, ExtractedName),
+            %% Rename to standard name without lib prefix and version
+            FinalExt = case Ext of
+                ".dll" -> ".dll";
+                _ -> ".so"
+            end,
+            FinalPath = filename:join(DestDir, "cozodb" ++ FinalExt),
+            case file:rename(ExtractedPath, FinalPath) of
+                ok ->
+                    NifPath = filename:join(DestDir, "cozodb"),
+                    {ok, NifPath};
+                {error, RenameReason} ->
+                    logger:warning("Failed to rename ~s to ~s: ~p",
+                                   [ExtractedPath, FinalPath, RenameReason]),
+                    %% Try to use the extracted file directly
+                    NifPath = filename:rootname(ExtractedPath),
+                    {ok, NifPath}
+            end;
         {error, Reason} ->
             file:delete(TarFile),
             {error, {extract_failed, Reason}}

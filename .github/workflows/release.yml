@@ -5,7 +5,8 @@ name: Build precompiled NIFs
       - main
       - 'fix/**'
     tags:
-      - '*'
+      # Matches v0.3.2, v1.0.0, etc.
+      - 'v*'
   workflow_dispatch:
 
 concurrency:
@@ -16,18 +17,20 @@ jobs:
   build_release:
     name: 'NIF ${{ matrix.nif }} - ${{ matrix.job.target }} (${{ matrix.job.os }})'
     runs-on: '${{ matrix.job.os }}'
+    permissions:
+      contents: write
     strategy:
       fail-fast: false
       matrix:
         nif:
           - '2.17'
         job:
-          # macOS targets (native builds) - WORKING
+          # macOS targets (native builds)
           - target: aarch64-apple-darwin
             os: macos-latest
           - target: x86_64-apple-darwin
             os: macos-latest
-          # Linux x86_64 native build - WORKING
+          # Linux x86_64 native build
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-24.04
           # Linux ARM64 native build on ARM runner
@@ -40,21 +43,11 @@ jobs:
     steps:
       - name: Checkout source code
         uses: actions/checkout@v4
-      - name: Extract project version and branch/tag
+      - name: Extract project version
         shell: bash
         run: |
           # Get the project version from cozodb.app.src
           echo "PROJECT_VERSION=$(sed -n 's/.*{vsn, "\([^"]*\)".*/\1/p' src/cozodb.app.src | head -n1)" >> $GITHUB_ENV
-
-          # Determine if it's a tag or a branch
-          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
-            BRANCH_OR_TAG="${GITHUB_REF#refs/tags/}"
-          else
-            BRANCH_OR_TAG="${GITHUB_REF#refs/heads/}"
-          fi
-          # Sanitize branch name: replace / with -
-          BRANCH_OR_TAG="${BRANCH_OR_TAG//\//-}"
-          echo "BRANCH_OR_TAG=$BRANCH_OR_TAG" >> $GITHUB_ENV
       - name: Install build dependencies (Linux)
         if: runner.os == 'Linux'
         run: |
@@ -104,51 +97,16 @@ jobs:
           use-cross: '${{ matrix.job.use-cross }}'
           project-dir: native/cozodb
           cargo-args: '${{ matrix.job.cargo-args }}'
-      - name: Rename Artifact with Branch & Version
-        shell: bash
-        run: |
-          echo "Debug: file-name = ${{ steps.build-crate.outputs.file-name }}"
-          echo "Debug: file-path = ${{ steps.build-crate.outputs.file-path }}"
-          echo "Debug: Listing current directory:"
-          ls -la *.tar.gz 2>/dev/null || echo "No tar.gz files in current dir"
-          ls -la native/cozodb/*.tar.gz 2>/dev/null || echo "No tar.gz files in native/cozodb"
-
-          # Find the artifact file
-          ARTIFACT_PATH="${{ steps.build-crate.outputs.file-path }}"
-          if [ -z "$ARTIFACT_PATH" ] || [ ! -f "$ARTIFACT_PATH" ]; then
-            echo "Output file-path not found, searching for artifact..."
-            ARTIFACT_PATH=$(find . -name "*.tar.gz" -type f | head -1)
-          fi
-
-          if [ -z "$ARTIFACT_PATH" ] || [ ! -f "$ARTIFACT_PATH" ]; then
-            echo "Error: Could not find artifact file"
-            exit 1
-          fi
-
-          NEW_NAME="cozodb-${{ env.BRANCH_OR_TAG }}-${{ env.PROJECT_VERSION }}-${{ matrix.job.target }}.tar.gz"
-          echo "Moving $ARTIFACT_PATH to $NEW_NAME"
-          mv "$ARTIFACT_PATH" "$NEW_NAME"
-          echo "RENAMED_ARTIFACT=$NEW_NAME" >> $GITHUB_ENV
-      - name: Generate checksum
-        shell: bash
-        run: |
-          if [[ "$RUNNER_OS" == "macOS" ]]; then
-            shasum -a 256 "${{ env.RENAMED_ARTIFACT }}" > "${{ env.RENAMED_ARTIFACT }}.sha256"
-          else
-            sha256sum "${{ env.RENAMED_ARTIFACT }}" > "${{ env.RENAMED_ARTIFACT }}.sha256"
-          fi
-          echo "CHECKSUM_FILE=${{ env.RENAMED_ARTIFACT }}.sha256" >> $GITHUB_ENV
       - name: Artifact upload
         uses: actions/upload-artifact@v4
         with:
-          name: '${{ env.RENAMED_ARTIFACT }}'
-          path: |
-            ${{ env.RENAMED_ARTIFACT }}
-            ${{ env.CHECKSUM_FILE }}
-      - name: Publish archives and packages
+          name: '${{ steps.build-crate.outputs.file-name }}'
+          path: '${{ steps.build-crate.outputs.file-path }}'
+          retention-days: 5
+      - name: Publish to GitHub Releases
         uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
         with:
-          files: |
-            ${{ env.RENAMED_ARTIFACT }}
-            ${{ env.CHECKSUM_FILE }}
-        if: 'startsWith(github.ref, ''refs/tags/'')'
+          files: '${{ steps.build-crate.outputs.file-path }}'
+          make_latest: true
+          generate_release_notes: true
