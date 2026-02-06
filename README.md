@@ -30,6 +30,9 @@ CozoDB is a FOSS embeddable, transactional, relational-graph-vector database, wi
 {ok, Result} = cozodb:run(Db, "?[] <- [[1, 2, 3]]").
 
 %% Close the database
+%% Notice that close no longer releases the NIF resource. This will be done 
+%% when the Erlang GC triggers as long as you no longer have a reference to 
+%% `Db`.
 ok = cozodb:close(Db).
 ```
 
@@ -264,7 +267,11 @@ os:putenv("COZO_ROCKSDB_ENABLE_STATISTICS", "true"),
 
 ### jemalloc
 
-The NIF uses jemalloc for memory management. Configure via environment variables:
+The NIF uses jemalloc as the global allocator for both Rust and RocksDB (C++) memory. This is enabled by default via the `jemalloc` Cargo feature.
+
+#### Runtime Configuration
+
+Configure jemalloc behavior via environment variables at application startup:
 
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
@@ -272,6 +279,18 @@ The NIF uses jemalloc for memory management. Configure via environment variables
 | `COZODB_JEMALLOC_MUZZY_DECAY_MS` | i64 | 1000 | Muzzy page decay time in ms |
 | `COZODB_JEMALLOC_BACKGROUND_THREAD` | bool | true | Enable background purging thread |
 | `COZODB_JEMALLOC_NARENAS` | u32 | auto | Number of arenas (optional) |
+
+#### Heap Profiling (opt-in)
+
+Heap profiling via `dump_heap_profile/1` requires the `jemalloc-profiling` Cargo feature, which is **not** enabled by default. This feature adds platform-specific stack unwinding (libunwind on aarch64) that can cause issues in some container environments (e.g., AWS Graviton ECS).
+
+To enable heap profiling, build with:
+
+```bash
+cd native/cozodb && cargo build --release --features jemalloc-profiling
+```
+
+Then at runtime, set `MALLOC_CONF="prof:true"` before starting the application. Without the feature, `dump_heap_profile/1` returns `{error, "profiling_not_compiled"}`.
 
 ### Docker
 

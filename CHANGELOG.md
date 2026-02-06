@@ -1,4 +1,14 @@
 # CHANGELOG
+# 0.3.3
+
+## Bug Fixes
+* Fixed silent crash on AWS Graviton (aarch64 Linux) caused by jemalloc's profiling feature. The `profiling` feature compiles jemalloc with `-DJEMALLOC_PROF`, which adds platform-specific stack unwinding via libunwind. On aarch64 Linux in container environments (ECS, Docker), this initialization runs during `dlopen()` and can crash the BEAM VM before any Erlang error handling can catch it.
+
+## Changes
+* Removed `profiling` from the default jemalloc dependency features. Memory statistics (`stats`) are still included and work as before.
+* Added opt-in `jemalloc-profiling` Cargo feature for heap profiling support (`dump_heap_profile/1`). Enable with `--features jemalloc-profiling` when building.
+* `dump_heap_profile/1` now returns `{error, "profiling_not_compiled"}` when the `jemalloc-profiling` feature is not enabled.
+
 # 0.3.2
 ## Bug Fixes
 * Fixed an issue when deploying in Docker. Jemalloc crashes when deploying in Docker Compose on Apple Silicon due to differences in OS page sizes - Added documentation to README

@@ -24,9 +24,9 @@ num_cpus = "1.17.0"
 # Note: disable-initial-exec-tls is required for Docker/dlopen() compatibility
 # to avoid "cannot allocate memory in static TLS block" errors
 [target.'cfg(not(target_env = "msvc"))'.dependencies]
-tikv-jemallocator = { version = "0.6", features = ["stats", "profiling", "disable_initial_exec_tls"], optional = true }
-tikv-jemalloc-ctl = { version = "0.6", features = ["stats", "profiling"], optional = true }
-tikv-jemalloc-sys = { version = "0.6", features = ["stats", "profiling", "disable_initial_exec_tls"], optional = true }
+tikv-jemallocator = { version = "0.6", features = ["stats", "disable_initial_exec_tls"], optional = true }
+tikv-jemalloc-ctl = { version = "0.6", features = ["stats"], optional = true }
+tikv-jemalloc-sys = { version = "0.6", features = ["stats", "disable_initial_exec_tls"], optional = true }
 
 # ==============================================================================
 # Pin the following to match cozo's working version
@@ -98,6 +98,12 @@ jemalloc = ["tikv-jemallocator", "tikv-jemalloc-ctl", "tikv-jemalloc-sys", "cozo
 # Hybrid mode: Erlang allocator for Rust + jemalloc for RocksDB
 # This gives best of both worlds: BEAM-tracked Rust memory + jemalloc stats for RocksDB
 nif_alloc_rocksdb_jemalloc = ["nif_alloc", "tikv-jemalloc-ctl", "tikv-jemalloc-sys", "cozo/rocksdb-jemalloc"]
+
+# Enable jemalloc heap profiling support (dump_heap_profile/1).
+# This adds platform-specific stack unwinding (libunwind on aarch64) which can
+# cause issues in some container environments. Only enable if you need heap profiling.
+# Requires: MALLOC_CONF="prof:true" at runtime to activate.
+jemalloc-profiling = ["tikv-jemallocator/profiling", "tikv-jemalloc-ctl/profiling", "tikv-jemalloc-sys/profiling"]
 
 [target.'cfg(target_os = "linux")'.dependencies]
 cozo = { git = "https://github.com/aramallo/cozo.git", tag = "v0.8.2-leapsight", features = ["io-uring"] }

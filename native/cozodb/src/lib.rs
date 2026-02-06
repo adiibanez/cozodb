@@ -1100,8 +1100,8 @@ fn memory_stats<'a>(env: Env<'a>) -> NifResult<Term<'a>> {
 /// Note: Only available when jemalloc is the global allocator (not when using nif_alloc).
 #[rustler::nif(name = "dump_heap_profile_nif")]
 fn dump_heap_profile<'a>(env: Env<'a>, path: String) -> NifResult<Term<'a>> {
-    // Only available when jemalloc is the global allocator
-    #[cfg(all(feature = "jemalloc", not(feature = "nif_alloc"), not(target_env = "msvc")))]
+    // Only available when jemalloc is the global allocator AND profiling feature is enabled
+    #[cfg(all(feature = "jemalloc", feature = "jemalloc-profiling", not(feature = "nif_alloc"), not(target_env = "msvc")))]
     {
         use std::ffi::CString;
 
@@ -1155,11 +1155,11 @@ fn dump_heap_profile<'a>(env: Env<'a>, path: String) -> NifResult<Term<'a>> {
         Ok((atoms::error(), "using_erlang_allocator".encode(env)).encode(env))
     }
 
-    // Fallback for other cases (no jemalloc at all)
-    #[cfg(all(not(feature = "nif_alloc"), not(all(feature = "jemalloc", not(target_env = "msvc")))))]
+    // Fallback: jemalloc without profiling, or no jemalloc at all
+    #[cfg(all(not(feature = "nif_alloc"), not(all(feature = "jemalloc", feature = "jemalloc-profiling", not(target_env = "msvc")))))]
     {
         let _ = path; // suppress unused warning
-        Ok((atoms::error(), "not_jemalloc".encode(env)).encode(env))
+        Ok((atoms::error(), "profiling_not_compiled".encode(env)).encode(env))
     }
 }
 
