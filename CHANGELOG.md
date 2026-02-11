@@ -69,7 +69,7 @@
 * Added `COZODB_BACKEND` environment variable support in Makefile
   - `make build` or `make build-rocksdb` - Build with cozorocks (default)
   - `COZODB_BACKEND=newrocksdb make build` or `make build-newrocksdb` - Build with rust-rocksdb
-* Note: `rebar3_cargo` does not support passing Cargo features; use Makefile targets
+* Build options work with `make`, `rebar3 compile`, and `mix compile` via env vars
 
 ## Improvements
 * Improved Erlang serialization for better performance

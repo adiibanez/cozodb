@@ -105,6 +105,13 @@ nif_alloc_rocksdb_jemalloc = ["nif_alloc", "tikv-jemalloc-ctl", "tikv-jemalloc-s
 # Requires: MALLOC_CONF="prof:true" at runtime to activate.
 jemalloc-profiling = ["tikv-jemallocator/profiling", "tikv-jemalloc-ctl/profiling", "tikv-jemalloc-sys/profiling"]
 
-[target.'cfg(target_os = "linux")'.dependencies]
-cozo = { git = "https://github.com/aramallo/cozo.git", tag = "v0.8.2-leapsight", features = ["io-uring"] }
+# Enable Linux io_uring for RocksDB async I/O (Linux-only, requires liburing-dev).
+# Disabled by default due to crashes when combined with jemalloc on RocksDB 10.9.1
+# in container environments (Docker named volumes, AWS ECS).
+# The issue is a three-way interaction between RocksDB 10.9.1's per-thread
+# io_uring instances (ThreadLocalPtr/pthread TLS), jemalloc's TLS-based thread
+# caches, and the BEAM VM's many dirty IO scheduler threads.
+# RocksDB falls back to standard pread/pwrite which performs well.
+# Enable via: COZODB_IO_URING=true make build
+io-uring = ["cozo/io-uring"]
 

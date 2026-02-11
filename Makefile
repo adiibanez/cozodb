@@ -19,11 +19,32 @@ export JEMALLOC_SYS_WITH_MALLOC_CONF ?= background_thread:false,dirty_decay_ms:1
 # IMPORTANT: The two backends are MUTUALLY EXCLUSIVE due to allocator conflicts.
 COZODB_BACKEND ?= rocksdb
 
-# Cargo feature flags based on selected backend
+# io_uring for RocksDB async I/O (Linux-only, requires liburing-dev):
+#   COZODB_IO_URING=true  - Enable io_uring (bare-metal Linux recommended)
+#   COZODB_IO_URING=false - Disable io_uring (default, safe for containers)
+# WARNING: io_uring + jemalloc + RocksDB 10.9.1 crashes in container environments
+# (Docker named volumes, AWS ECS) due to TLS conflicts with the BEAM VM.
+COZODB_IO_URING ?= false
+
+# Cargo feature flags based on selected backend and options
+EXTRA_CARGO_FEATURES :=
+
+ifeq ($(COZODB_IO_URING),true)
+EXTRA_CARGO_FEATURES += io-uring
+endif
+
 ifeq ($(COZODB_BACKEND),newrocksdb)
+ifneq ($(EXTRA_CARGO_FEATURES),)
+CARGO_FEATURES := --no-default-features --features "new-rocksdb-default,$(EXTRA_CARGO_FEATURES)"
+else
 CARGO_FEATURES := --no-default-features --features "new-rocksdb-default"
+endif
+else
+ifneq ($(EXTRA_CARGO_FEATURES),)
+CARGO_FEATURES := --features "$(EXTRA_CARGO_FEATURES)"
 else
 CARGO_FEATURES :=
+endif
 endif
 
 .PHONY: all
@@ -36,7 +57,7 @@ build: cargo-build
 # Build with the selected backend (controlled by COZODB_BACKEND env var)
 .PHONY: cargo-build
 cargo-build:
-	@echo "Building with COZODB_BACKEND=$(COZODB_BACKEND)"
+	@echo "Building with COZODB_BACKEND=$(COZODB_BACKEND) COZODB_IO_URING=$(COZODB_IO_URING)"
 	cd native/cozodb && cargo build --release $(CARGO_FEATURES)
 	@mkdir -p priv/crates/cozodb
 	@cp native/cozodb/target/release/libcozodb.so priv/crates/cozodb/cozodb.so 2>/dev/null || \

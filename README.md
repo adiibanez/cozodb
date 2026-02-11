@@ -13,6 +13,8 @@ CozoDB is a FOSS embeddable, transactional, relational-graph-vector database, wi
 - [RocksDB Backends](#rocksdb-backends)
   - [rocksdb (cozorocks)](#1-rocksdb-cozorocks---default)
   - [newrocksdb (rust-rocksdb)](#2-newrocksdb-rust-rocksdb---alternative)
+- [Build Options](#build-options)
+  - [io_uring](#io_uring)
 - [Configuration](#configuration)
   - [jemalloc](#jemalloc)
   - [Docker](#docker)
@@ -30,8 +32,8 @@ CozoDB is a FOSS embeddable, transactional, relational-graph-vector database, wi
 {ok, Result} = cozodb:run(Db, "?[] <- [[1, 2, 3]]").
 
 %% Close the database
-%% Notice that close no longer releases the NIF resource. This will be done 
-%% when the Erlang GC triggers as long as you no longer have a reference to 
+%% Notice that close no longer releases the NIF resource. This will be done
+%% when the Erlang GC triggers as long as you no longer have a reference to
 %% `Db`.
 ok = cozodb:close(Db).
 ```
@@ -42,10 +44,11 @@ ok = cozodb:close(Db).
 
 | Platform | Dependencies |
 |----------|--------------|
-| **Runtime** | Erlang OTP26+ and/or Elixir (latest) |
-| **Build** | Rust 1.76.0+ |
+| **Runtime** | Erlang OTP27+ and/or Elixir (latest) |
+| **Build** | Rust 1.76.0+, Make |
 | **macOS** | `liblz4`, `libssl` |
-| **Linux** | `build-essential`, `liblz4-dev`, `libncurses-dev`, `libsnappy-dev`, `libssl-dev`, `liburing-dev`, `liburing2`, `pkg-config` |
+| **Linux** | `build-essential`, `liblz4-dev`, `libncurses-dev`, `libsnappy-dev`, `libssl-dev`, `pkg-config` |
+| **Linux (io_uring)** | All of the above plus `liburing-dev` (see [io_uring](#io_uring)) |
 
 ### Erlang
 
@@ -119,13 +122,7 @@ An alternative RocksDB backend using the official **rust-rocksdb** crate. This b
 
 #### Building with newrocksdb
 
-To use the `newrocksdb` backend, you must build with the `new-rocksdb-default` feature instead of the default features.
-
-> **Note:** The `rebar3_cargo` plugin does not support passing Cargo feature flags. Use the Makefile targets or manual Cargo build as described below.
-
-##### Option 1: Makefile with Environment Variable (Recommended)
-
-Use the provided Makefile with the `COZODB_BACKEND` environment variable:
+To use the `newrocksdb` backend, set the `COZODB_BACKEND` environment variable at compile time:
 
 ```bash
 # Use newrocksdb backend
@@ -140,39 +137,11 @@ make build
 make build-rocksdb
 ```
 
-##### Option 2: Manual Cargo Build
-
-Build the NIF manually before running rebar3:
+This works the same way when `cozodb` is used as a rebar3/mix dependency:
 
 ```bash
-# In native/cozodb directory
-cargo build --release --no-default-features --features "new-rocksdb-default"
-
-# Copy the built library to priv/
-mkdir -p ../../priv/crates/cozodb
-cp target/release/libcozodb.dylib ../../priv/crates/cozodb/cozodb.so  # macOS
-# or: cp target/release/libcozodb.so ../../priv/crates/cozodb/cozodb.so  # Linux
-
-# Then compile Erlang code only
-cd ../..
-rebar3 compile
+COZODB_BACKEND=newrocksdb rebar3 compile
 ```
-
-##### Option 3: Modify Cargo.toml
-
-Edit `native/cozodb/Cargo.toml` to change the default features permanently:
-
-```toml
-[features]
-default = [
-    "cozo/storage-sqlite",
-    "cozo/storage-new-rocksdb",  # Changed from storage-rocksdb
-    "cozo/graph-algo",
-    "jemalloc"
-]
-```
-
-Then build normally with `make build` or `rebar3 compile`.
 
 #### newrocksdb Environment Variables
 
@@ -263,6 +232,36 @@ os:putenv("COZO_ROCKSDB_ENABLE_STATISTICS", "true"),
 {ok, Db} = cozodb:open(newrocksdb, "/path/to/db").
 ```
 
+## Build Options
+
+All build options are controlled via environment variables and work with `make build`, `rebar3 compile`, and `mix compile`:
+
+| Variable | Values | Default | Description |
+|----------|--------|---------|-------------|
+| `COZODB_BACKEND` | `rocksdb`, `newrocksdb` | `rocksdb` | RocksDB backend selection |
+| `COZODB_IO_URING` | `true`, `false` | `false` | Enable Linux io_uring async I/O |
+
+### io_uring
+
+Linux io_uring support for RocksDB async I/O is available as an opt-in build feature. It is **disabled by default** because the combination of io_uring + jemalloc + RocksDB 10.9.1 causes segfaults in container environments (Docker with named volumes, AWS ECS). This is due to TLS (Thread Local Storage) conflicts between RocksDB's per-thread io_uring instances, jemalloc's thread caches, and the BEAM VM's dirty IO scheduler threads.
+
+When disabled, RocksDB uses standard `pread`/`pwrite` syscalls which perform well across all environments.
+
+To enable io_uring (Linux-only, requires `liburing-dev`):
+
+```bash
+# Direct build
+COZODB_IO_URING=true make build
+
+# As a rebar3 dep
+COZODB_IO_URING=true rebar3 compile
+
+# Docker
+docker build --build-arg COZODB_IO_URING=true -t myapp .
+```
+
+> **WARNING:** Only enable io_uring for bare-metal Linux deployments where you have verified it works with your kernel version. Do not enable in container environments (Docker, ECS, Kubernetes).
+
 ## Configuration
 
 ### jemalloc
@@ -320,6 +319,14 @@ For container compatibility, set `JEMALLOC_SYS_WITH_MALLOC_CONF` to bake safe de
 ENV JEMALLOC_SYS_WITH_MALLOC_CONF="background_thread:false,dirty_decay_ms:1000,muzzy_decay_ms:1000"
 ```
 
+#### io_uring in Docker
+
+io_uring is disabled by default, which is the recommended setting for container deployments. If you need to enable it (not recommended), pass the build arg:
+
+```bash
+docker build --build-arg COZODB_IO_URING=true -t myapp .
+```
+
 ### Memory Tuning Tips
 
 | Use Case | Recommendation |
@@ -330,39 +337,33 @@ ENV JEMALLOC_SYS_WITH_MALLOC_CONF="background_thread:false,dirty_decay_ms:1000,m
 
 ## Development
 
+### Building
+
+```bash
+# Default build (rocksdb backend, no io_uring)
+make build
+
+# With newrocksdb backend
+COZODB_BACKEND=newrocksdb make build
+
+# With io_uring (Linux bare-metal only)
+COZODB_IO_URING=true make build
+
+# Combine options
+COZODB_BACKEND=newrocksdb COZODB_IO_URING=true make build
+```
+
+### Running Tests
+
+```bash
+make test
+```
+
 ### Upgrading the cozo Dependency
 
 ```bash
 cd native/cozodb
 cargo update -p cozo
-```
-
-### Using newrocksdb Backend as a Consumer
-
-By default, cozodb compiles with the `rocksdb` (cozorocks) backend. If you need the `newrocksdb` backend with environment variable configuration in your own project, you have two options:
-
-#### Option A: Fork and Modify (Recommended)
-
-1. Fork the cozodb repository
-2. Modify `native/cozodb/Cargo.toml` to use `new-rocksdb-default` as the default features
-3. Point your dependency to your fork
-
-#### Option B: Pre-build the NIF
-
-Before running `rebar3 compile` in your project:
-
-```bash
-# Clone cozodb
-git clone https://github.com/leapsight/cozodb.git /tmp/cozodb
-cd /tmp/cozodb
-
-# Build with newrocksdb backend
-COZODB_BACKEND=newrocksdb make cargo-build
-
-# Copy the built NIF to your project's _build directory
-# (after rebar3 has fetched dependencies)
-mkdir -p YOUR_PROJECT/_build/default/lib/cozodb/priv/crates/cozodb
-cp priv/crates/cozodb/cozodb.so YOUR_PROJECT/_build/default/lib/cozodb/priv/crates/cozodb/
 ```
 
 ## License
