@@ -1,4 +1,6 @@
 # CHANGELOG
+# 0.3.5
+* Update to cozo v0.8.4-leapsight making `options` file the priority
 # 0.3.4
 * Makes io-uring an option disabled by default (AWS ECS crashes)
 * Reverts harcoded values in Cozo/cozorocks that where left during mem leak fix and allow them to be passed as ENV VARS. `option` is the main way to set those values, ENV VARS will override them
