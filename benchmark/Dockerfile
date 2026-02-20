@@ -3,6 +3,10 @@
 
 FROM elixir:1.18-otp-27
 
+# Build args for compile-time feature selection
+# Set COZODB_IO_URING=true to enable io_uring (not recommended for containers)
+ARG COZODB_IO_URING=false
+
 # Install build dependencies
 RUN apt-get update && apt-get install -y \
     build-essential \
@@ -12,9 +16,13 @@ RUN apt-get update && apt-get install -y \
     clang \
     libclang-dev \
     pkg-config \
-    liburing-dev \
     procps \
     && rm -rf /var/lib/apt/lists/*
+
+# Conditionally install liburing-dev when io_uring is enabled
+RUN if [ "$COZODB_IO_URING" = "true" ]; then \
+        apt-get update && apt-get install -y liburing-dev && rm -rf /var/lib/apt/lists/*; \
+    fi
 
 # Install Rust
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
@@ -39,8 +47,7 @@ ENV JEMALLOC_SYS_WITH_MALLOC_CONF="background_thread:false,dirty_decay_ms:1000,m
 # Different from macOS Apple Silicon which uses 16KB (LG_PAGE=14) or 64KB pages
 ENV JEMALLOC_SYS_WITH_LG_PAGE=12
 
-
-RUN cd native/cozodb && cargo build --release
+RUN COZODB_IO_URING=${COZODB_IO_URING} make cargo-build
 
 # Copy the built NIF to priv directory
 RUN mkdir -p priv/crates/cozodb && \

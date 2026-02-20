@@ -1,6 +1,6 @@
 {application, cozodb, [
     {description, "Erlang NIF wrapper for CozoDB using Rustler."},
-    {vsn, "0.3.2"},
+    {vsn, "0.3.4"},
     {registered, []},
     {mod, {cozodb_app, []}},
     {applications, [

@@ -8,20 +8,17 @@ CozoDB is a FOSS embeddable, transactional, relational-graph-vector database, wi
 
 - [Quick Start](#quick-start)
 - [Installation](#installation)
-  - [Requirements](#requirements)
-  - [Erlang](#erlang)
-  - [Elixir](#elixir)
 - [Basic Usage](#basic-usage)
 - [Storage Engines](#storage-engines)
 - [RocksDB Backends](#rocksdb-backends)
   - [rocksdb (cozorocks)](#1-rocksdb-cozorocks---default)
   - [newrocksdb (rust-rocksdb)](#2-newrocksdb-rust-rocksdb---alternative)
-  - [Building with newrocksdb](#building-with-newrocksdb)
-  - [Environment Variables](#newrocksdb-environment-variables)
+- [Build Options](#build-options)
+  - [io_uring](#io_uring)
 - [Configuration](#configuration)
-  - [jemalloc](#jemalloc-configuration)
+  - [jemalloc](#jemalloc)
   - [Docker](#docker)
-  - [Memory Tuning](#memory-tuning-tips)
+  - [Memory Tuning Tips](#memory-tuning-tips)
 - [Development](#development)
 - [License](#license)
 
@@ -35,6 +32,9 @@ CozoDB is a FOSS embeddable, transactional, relational-graph-vector database, wi
 {ok, Result} = cozodb:run(Db, "?[] <- [[1, 2, 3]]").
 
 %% Close the database
+%% Notice that close no longer releases the NIF resource. This will be done
+%% when the Erlang GC triggers as long as you no longer have a reference to
+%% `Db`.
 ok = cozodb:close(Db).
 ```
 
@@ -44,10 +44,11 @@ ok = cozodb:close(Db).
 
 | Platform | Dependencies |
 |----------|--------------|
-| **Runtime** | Erlang OTP26+ and/or Elixir (latest) |
-| **Build** | Rust 1.76.0+ |
+| **Runtime** | Erlang OTP27+ and/or Elixir (latest) |
+| **Build** | Rust 1.76.0+, Make |
 | **macOS** | `liblz4`, `libssl` |
-| **Linux** | `build-essential`, `liblz4-dev`, `libncurses-dev`, `libsnappy-dev`, `libssl-dev`, `liburing-dev`, `liburing2`, `pkg-config` |
+| **Linux** | `build-essential`, `liblz4-dev`, `libncurses-dev`, `libsnappy-dev`, `libssl-dev`, `pkg-config` |
+| **Linux (io_uring)** | All of the above plus `liburing-dev` (see [io_uring](#io_uring)) |
 
 ### Erlang
 
@@ -103,22 +104,6 @@ CozoDB supports multiple storage engines:
 | `rocksdb` | RocksDB via cozorocks C++ FFI (default, high-performance) |
 | `newrocksdb` | RocksDB via rust-rocksdb crate (comprehensive env var config) |
 
-### Basic Usage
-
-```erlang
-%% In-memory database
-{ok, Db} = cozodb:open(mem).
-
-%% SQLite database
-{ok, Db} = cozodb:open(sqlite, "/path/to/db.sqlite").
-
-%% RocksDB database (default backend)
-{ok, Db} = cozodb:open(rocksdb, "/path/to/db").
-
-%% New RocksDB backend (if compiled with new-rocksdb-default feature)
-{ok, Db} = cozodb:open(newrocksdb, "/path/to/db").
-```
-
 ## RocksDB Backends
 
 There are two RocksDB backends available:
@@ -137,13 +122,7 @@ An alternative RocksDB backend using the official **rust-rocksdb** crate. This b
 
 #### Building with newrocksdb
 
-To use the `newrocksdb` backend, you must build with the `new-rocksdb-default` feature instead of the default features.
-
-> **Note:** The `rebar3_cargo` plugin does not support passing Cargo feature flags. Use the Makefile targets or manual Cargo build as described below.
-
-##### Option 1: Makefile with Environment Variable (Recommended)
-
-Use the provided Makefile with the `COZODB_BACKEND` environment variable:
+To use the `newrocksdb` backend, set the `COZODB_BACKEND` environment variable at compile time:
 
 ```bash
 # Use newrocksdb backend
@@ -158,39 +137,11 @@ make build
 make build-rocksdb
 ```
 
-##### Option 2: Manual Cargo Build
-
-Build the NIF manually before running rebar3:
+This works the same way when `cozodb` is used as a rebar3/mix dependency:
 
 ```bash
-# In native/cozodb directory
-cargo build --release --no-default-features --features "new-rocksdb-default"
-
-# Copy the built library to priv/
-mkdir -p ../../priv/crates/cozodb
-cp target/release/libcozodb.dylib ../../priv/crates/cozodb/cozodb.so  # macOS
-# or: cp target/release/libcozodb.so ../../priv/crates/cozodb/cozodb.so  # Linux
-
-# Then compile Erlang code only
-cd ../..
-rebar3 compile
+COZODB_BACKEND=newrocksdb rebar3 compile
 ```
-
-##### Option 3: Modify Cargo.toml
-
-Edit `native/cozodb/Cargo.toml` to change the default features permanently:
-
-```toml
-[features]
-default = [
-    "cozo/storage-sqlite",
-    "cozo/storage-new-rocksdb",  # Changed from storage-rocksdb
-    "cozo/graph-algo",
-    "jemalloc"
-]
-```
-
-Then build normally with `make build` or `rebar3 compile`.
 
 #### newrocksdb Environment Variables
 
@@ -281,9 +232,45 @@ os:putenv("COZO_ROCKSDB_ENABLE_STATISTICS", "true"),
 {ok, Db} = cozodb:open(newrocksdb, "/path/to/db").
 ```
 
-## jemalloc Configuration
+## Build Options
 
-The NIF uses jemalloc for memory management. Configure via environment variables:
+All build options are controlled via environment variables and work with `make build`, `rebar3 compile`, and `mix compile`:
+
+| Variable | Values | Default | Description |
+|----------|--------|---------|-------------|
+| `COZODB_BACKEND` | `rocksdb`, `newrocksdb` | `rocksdb` | RocksDB backend selection |
+| `COZODB_IO_URING` | `true`, `false` | `false` | Enable Linux io_uring async I/O |
+
+### io_uring
+
+Linux io_uring support for RocksDB async I/O is available as an opt-in build feature. It is **disabled by default** because the combination of io_uring + jemalloc + RocksDB 10.9.1 causes segfaults in container environments (Docker with named volumes, AWS ECS). This is due to TLS (Thread Local Storage) conflicts between RocksDB's per-thread io_uring instances, jemalloc's thread caches, and the BEAM VM's dirty IO scheduler threads.
+
+When disabled, RocksDB uses standard `pread`/`pwrite` syscalls which perform well across all environments.
+
+To enable io_uring (Linux-only, requires `liburing-dev`):
+
+```bash
+# Direct build
+COZODB_IO_URING=true make build
+
+# As a rebar3 dep
+COZODB_IO_URING=true rebar3 compile
+
+# Docker
+docker build --build-arg COZODB_IO_URING=true -t myapp .
+```
+
+> **WARNING:** Only enable io_uring for bare-metal Linux deployments where you have verified it works with your kernel version. Do not enable in container environments (Docker, ECS, Kubernetes).
+
+## Configuration
+
+### jemalloc
+
+The NIF uses jemalloc as the global allocator for both Rust and RocksDB (C++) memory. This is enabled by default via the `jemalloc` Cargo feature.
+
+#### Runtime Configuration
+
+Configure jemalloc behavior via environment variables at application startup:
 
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
@@ -292,28 +279,93 @@ The NIF uses jemalloc for memory management. Configure via environment variables
 | `COZODB_JEMALLOC_BACKGROUND_THREAD` | bool | true | Enable background purging thread |
 | `COZODB_JEMALLOC_NARENAS` | u32 | auto | Number of arenas (optional) |
 
+#### Heap Profiling (opt-in)
+
+Heap profiling via `dump_heap_profile/1` requires the `jemalloc-profiling` Cargo feature, which is **not** enabled by default. This feature adds platform-specific stack unwinding (libunwind on aarch64) that can cause issues in some container environments (e.g., AWS Graviton ECS).
+
+To enable heap profiling, build with:
+
+```bash
+cd native/cozodb && cargo build --release --features jemalloc-profiling
+```
+
+Then at runtime, set `MALLOC_CONF="prof:true"` before starting the application. Without the feature, `dump_heap_profile/1` returns `{error, "profiling_not_compiled"}`.
+
 ### Docker
-#### Build the Rust NIF with C++20 support (required by newer RocksDB headers)
+
+When running in Docker containers, additional configuration is required.
+
+#### C++20 Support
+
+Build the Rust NIF with C++20 support (required by newer RocksDB headers):
+
 ```Dockerfile
 ENV CXXFLAGS="-std=c++20"
 ```
-#### CRITICAL jemalloc Config
-* Set page size for jemalloc to match Linux x86_64 (4KB = 2^12) -- This prevents "page size mismatch" errors when running in Docker containers. Different from macOS Apple Silicon which uses 16KB (LG_PAGE=14) or 64KB pages.
 
-Add the following to your Dockerfile:
+#### jemalloc Page Size
+
+Set page size for jemalloc to match Linux x86_64 (4KB = 2^12). This prevents "page size mismatch" errors when running in Docker containers (different from macOS Apple Silicon which uses 16KB or 64KB pages):
 
 ```Dockerfile
 ENV JEMALLOC_SYS_WITH_LG_PAGE=12
 ```
 
-Also for container compatibility set `JEMALLOC_SYS_WITH_MALLOC_CONF`. This bakes safe defaults directly into the binary - no runtime MALLOC_CONF needed
-See: https://github.com/tikv/jemallocator/blob/master/jemalloc-sys/README.md
+#### jemalloc Container Defaults
+
+For container compatibility, set `JEMALLOC_SYS_WITH_MALLOC_CONF` to bake safe defaults directly into the binary (no runtime `MALLOC_CONF` needed). See the [jemallocator documentation](https://github.com/tikv/jemallocator/blob/master/jemalloc-sys/README.md) for more details.
 
 ```Dockerfile
 ENV JEMALLOC_SYS_WITH_MALLOC_CONF="background_thread:false,dirty_decay_ms:1000,muzzy_decay_ms:1000"
 ```
+
+#### io_uring in Docker
+
+io_uring is disabled by default, which is the recommended setting for container deployments. If you need to enable it (not recommended), pass the build arg:
+
+```bash
+docker build --build-arg COZODB_IO_URING=true -t myapp .
+```
+
 ### Memory Tuning Tips
 
-- **Low memory usage:** Set decay values to 0 for aggressive memory return
-- **High throughput:** Use default decay (1000ms) with background thread enabled
-- **Large datasets:** Increase write buffer size and max write buffer number
+| Use Case | Recommendation |
+|----------|----------------|
+| **Low memory usage** | Set decay values to 0 for aggressive memory return |
+| **High throughput** | Use default decay (1000ms) with background thread enabled |
+| **Large datasets** | Increase write buffer size and max write buffer number |
+
+## Development
+
+### Building
+
+```bash
+# Default build (rocksdb backend, no io_uring)
+make build
+
+# With newrocksdb backend
+COZODB_BACKEND=newrocksdb make build
+
+# With io_uring (Linux bare-metal only)
+COZODB_IO_URING=true make build
+
+# Combine options
+COZODB_BACKEND=newrocksdb COZODB_IO_URING=true make build
+```
+
+### Running Tests
+
+```bash
+make test
+```
+
+### Upgrading the cozo Dependency
+
+```bash
+cd native/cozodb
+cargo update -p cozo
+```
+
+## License
+
+Apache License 2.0
