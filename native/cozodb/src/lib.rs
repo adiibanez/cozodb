@@ -186,9 +186,13 @@ fn configure_jemalloc() {
 
     // Enable background thread for async purging (reduces latency impact of decay)
     // COZODB_JEMALLOC_BACKGROUND_THREAD: "true" (default) or "false"
+    // Default to false to match compile-time malloc_conf setting.
+    // background_thread:true causes segfaults in container environments (Docker, ECS, K8s)
+    // due to signal handling conflicts between jemalloc's background thread and the BEAM VM.
+    // Users can opt-in via COZODB_JEMALLOC_BACKGROUND_THREAD=true if not running in containers.
     let enable_bg_thread = env::var("COZODB_JEMALLOC_BACKGROUND_THREAD")
-        .map(|v| v != "false" && v != "0")
-        .unwrap_or(true);
+        .map(|v| v == "true" || v == "1")
+        .unwrap_or(false);
 
     if enable_bg_thread {
         // background_thread requires jemalloc compiled with --enable-background-thread
