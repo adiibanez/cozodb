@@ -1,4 +1,7 @@
 # CHANGELOG
+# 0.3.6
+* Change NIF `COZODB_JEMALLOC_BACKGROUND_THREAD` to `false` by default inline with COZO's side
+
 # 0.3.5
 * Update to cozo v0.8.4-leapsight making `options` file the priority
 # 0.3.4
