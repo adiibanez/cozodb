@@ -1,4 +1,19 @@
 # CHANGELOG
+
+# 0.3.7
+
+## Bug Fixes
+* Fixed segmentation faults during startup on AWS ECS (and other container environments) caused by jemalloc TSD not being initialized on BEAM dirty IO scheduler threads during RocksDB open/recovery. Added eager per-thread jemalloc TLS warmup in all dirty-scheduled NIF functions and global warmup in `on_load`.
+* Fixed `COZODB_JEMALLOC_BACKGROUND_THREAD` runtime default contradicting the compile-time `malloc_conf` setting. The runtime `configure_jemalloc()` was overriding `background_thread:false` (baked in at compile time) back to `true`, causing signal handling conflicts with the BEAM VM in containers. Default is now `false`; opt-in via `COZODB_JEMALLOC_BACKGROUND_THREAD=true`.
+
+## Improvements
+* Benchmark Dockerfile (`benchmark/Dockerfile`) rewritten to realistically simulate a consumer application that depends on cozodb — uses `mix deps.get && mix compile` which triggers the full rebar3 pre_hooks chain automatically, instead of manual `make cargo-build` and `.so` copying.
+* Added `benchmark/Dockerfile.wellos` as a reference production multi-stage Dockerfile with:
+  - Compile-time jemalloc env vars (`JEMALLOC_SYS_WITH_MALLOC_CONF`, `JEMALLOC_SYS_WITH_LG_PAGE`, `CXXFLAGS`) correctly placed in the build stage
+  - Conditional `liburing` support via `COZODB_IO_URING` build arg (defaults to `false`)
+  - Runtime-only packages in the runner stage (no `-dev` headers)
+  - Removed unnecessary runtime dependencies (`libsodium`, `libsnappy`, `liblz4`, `liburing`) — all statically linked into their respective NIFs
+
 # 0.3.6
 * Change NIF `COZODB_JEMALLOC_BACKGROUND_THREAD` to `false` by default inline with COZO's side
 
