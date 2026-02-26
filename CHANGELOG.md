@@ -1,9 +1,13 @@
 # CHANGELOG
 
+# 0.3.8
+* Upgraded cozo dependency to v0.8.7-leapsight
+
 # 0.3.7
 
 ## Bug Fixes
-* Fixed segmentation faults during startup on AWS ECS (and other container environments) caused by jemalloc TSD not being initialized on BEAM dirty IO scheduler threads during RocksDB open/recovery. Added eager per-thread jemalloc TLS warmup in all dirty-scheduled NIF functions and global warmup in `on_load`.
+* **Fixed cross-allocator SIGSEGV during RocksDB Open in containers (Docker, ECS, K8s).** Root cause: `cozo/rocksdb-jemalloc` enables `unprefixed_malloc_on_supported_platforms` in cozorocks, which defines `malloc`/`free` as LOCAL symbols inside `cozodb.so`. Rust 1.73+ adds `-Bsymbolic-non-weak-functions` when linking cdylib crates, binding all C++ `free()` calls to jemalloc's `free` — even when the pointer was allocated by glibc (e.g., via `getline()` in `rocksdb::PosixHelper::GetQueueSysfsFileValueOfFd()`). This cross-allocator mismatch crashed in `_rjem_je_free_default`. Fixed in the cozo fork (v0.8.6-leapsight) by patching `cozorocks/build.rs` to replace `getline()+free()` with `fgets()` using a stack buffer in `io_posix.cc` at build time — RocksDB C++ continues to use jemalloc for memory management (critical for preventing 15GB+ memory growth under load).
+* Added eager per-thread jemalloc TLS warmup in all dirty-scheduled NIF functions and global warmup in `on_load` (defense-in-depth for jemalloc TSD initialization on BEAM dirty IO scheduler threads).
 * Fixed `COZODB_JEMALLOC_BACKGROUND_THREAD` runtime default contradicting the compile-time `malloc_conf` setting. The runtime `configure_jemalloc()` was overriding `background_thread:false` (baked in at compile time) back to `true`, causing signal handling conflicts with the BEAM VM in containers. Default is now `false`; opt-in via `COZODB_JEMALLOC_BACKGROUND_THREAD=true`.
 
 ## Improvements
