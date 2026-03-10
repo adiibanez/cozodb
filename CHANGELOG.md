@@ -1,5 +1,6 @@
 # CHANGELOG
-
+# 0.3.9
+* Added migration tool
 # 0.3.8
 * Upgraded cozo dependency to v0.8.7-leapsight
 
